@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
 import functools
 import math
 import re
@@ -577,6 +578,112 @@ def print_summary(result: TerrainLoadResult, *, limit: int = 8) -> None:
     print(format_summary_line(result, limit=limit))
 
 
+def attribute_summary(
+    attributes: np.ndarray, *, limit: int = 5
+) -> List[Tuple[int, int, float]]:
+    values, counts = np.unique(attributes, return_counts=True)
+    if counts.size == 0:
+        return []
+    order = np.argsort(counts)[::-1]
+    total = attributes.size
+    summary: List[Tuple[int, int, float]] = []
+    for idx in order[:limit]:
+        summary.append((int(values[idx]), int(counts[idx]), counts[idx] / float(total)))
+    return summary
+
+
+def format_detailed_summary(
+    result: TerrainLoadResult,
+    *,
+    object_limit: int = 5,
+    attribute_limit: int = 5,
+) -> str:
+    lines = [format_summary_line(result, limit=object_limit)]
+    heights = result.data.height
+    lines.append(
+        "Altura: mín {:.1f}, máx {:.1f}, média {:.1f}".format(
+            float(np.min(heights)), float(np.max(heights)), float(np.mean(heights))
+        )
+    )
+
+    layer1_unique = np.unique(result.data.mapping_layer1)
+    layer2_unique = np.unique(result.data.mapping_layer2)
+    alpha_active = np.count_nonzero(result.data.mapping_alpha > 0.01)
+    total_tiles = result.data.mapping_alpha.size
+    alpha_pct = 100.0 * alpha_active / float(total_tiles)
+    lines.append(
+        f"Texturas: {len(layer1_unique)} IDs na camada 1, {len(layer2_unique)} na camada 2"
+    )
+    lines.append(f"Alpha misto presente em {alpha_pct:.1f}% dos tiles")
+
+    attr_lines = []
+    for value, count, ratio in attribute_summary(result.data.attributes, limit=attribute_limit):
+        attr_lines.append(f"{value} ({count} tiles, {ratio * 100:.1f}%)")
+    if attr_lines:
+        lines.append("Atributos mais comuns: " + ", ".join(attr_lines))
+
+    if result.objects:
+        dominant = []
+        for type_id, count, name in object_summary(result, limit=object_limit):
+            label = name.replace("MODEL_", "") if name else str(type_id)
+            dominant.append(f"{label}: {count}")
+        if dominant:
+            lines.append("Objetos em destaque: " + ", ".join(dominant))
+
+    return "\n".join(lines)
+
+
+def print_detailed_summary(
+    result: TerrainLoadResult, *, object_limit: int = 8, attribute_limit: int = 5
+) -> None:
+    print(
+        format_detailed_summary(
+            result, object_limit=object_limit, attribute_limit=attribute_limit
+        )
+    )
+
+
+def export_objects_csv(
+    result: TerrainLoadResult, destination: Path, *, include_tile_coords: bool = True
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "type_id",
+        "type_name",
+        "x",
+        "y",
+        "z",
+        "pitch",
+        "yaw",
+        "roll",
+        "scale",
+    ]
+    if include_tile_coords:
+        fieldnames.extend(["tile_x", "tile_y"])
+
+    with destination.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for obj in result.objects:
+            row = {
+                "type_id": obj.type_id,
+                "type_name": obj.type_name or "",
+                "x": f"{obj.position[0]:.3f}",
+                "y": f"{obj.position[1]:.3f}",
+                "z": f"{obj.position[2]:.3f}",
+                "pitch": f"{obj.angles[0]:.3f}",
+                "yaw": f"{obj.angles[1]:.3f}",
+                "roll": f"{obj.angles[2]:.3f}",
+                "scale": f"{obj.scale:.3f}",
+            }
+            if include_tile_coords:
+                tile_x, tile_y = obj.tile_position
+                row["tile_x"] = f"{tile_x:.3f}"
+                row["tile_y"] = f"{tile_y:.3f}"
+            writer.writerow(row)
+
+
+
 def run_viewer(
     world_path: Path,
     *,
@@ -589,6 +696,10 @@ def run_viewer(
     max_objects: Optional[int],
     enum_path: Optional[Path] = None,
     log_summary: bool = True,
+    detailed_summary: bool = False,
+    summary_limit: int = 8,
+    render: bool = True,
+    export_objects: Optional[Path] = None,
 ) -> TerrainLoadResult:
     result = load_world_data(
         world_path,
@@ -599,17 +710,25 @@ def run_viewer(
         enum_path=enum_path,
     )
 
-    render_scene(
-        result.data,
-        result.objects,
-        output=output,
-        show=show,
-        max_objects=max_objects,
-        title=f"{world_path.name} (mapa {result.map_id}) — {len(result.objects)} objetos",
-    )
+    if render:
+        render_scene(
+            result.data,
+            result.objects,
+            output=output,
+            show=show,
+            max_objects=max_objects,
+            title=f"{world_path.name} (mapa {result.map_id}) — {len(result.objects)} objetos",
+        )
+
+    if export_objects is not None:
+        export_objects_csv(result, export_objects)
+        print(f"Objetos exportados em {export_objects}")
 
     if log_summary:
-        print_summary(result)
+        if detailed_summary:
+            print_detailed_summary(result, object_limit=summary_limit)
+        else:
+            print_summary(result, limit=summary_limit)
     return result
 
 
@@ -666,6 +785,8 @@ class TerrainViewerGUI:
         elif DEFAULT_ENUM_PATH.exists():
             self.enum_path = DEFAULT_ENUM_PATH
 
+        self.last_result: Optional[TerrainLoadResult] = None
+
         if initial_data_dir and initial_data_dir.is_dir():
             self.data_dir_var.set(str(initial_data_dir))
             self._populate_worlds(initial_data_dir)
@@ -719,7 +840,9 @@ class TerrainViewerGUI:
 
         tk.Button(buttons_frame, text="Visualizar", command=self.visualize).grid(row=0, column=0, padx=4)
         tk.Button(buttons_frame, text="Salvar PNG", command=self.save_png).grid(row=0, column=1, padx=4)
-        tk.Button(buttons_frame, text="Sair", command=self.root.quit).grid(row=0, column=2, padx=4)
+        tk.Button(buttons_frame, text="Exportar objetos", command=self.export_objects).grid(row=0, column=2, padx=4)
+        tk.Button(buttons_frame, text="Resumo", command=self.show_summary).grid(row=0, column=3, padx=4)
+        tk.Button(buttons_frame, text="Sair", command=self.root.quit).grid(row=0, column=4, padx=4)
 
         status_label = tk.Label(self.root, textvariable=self.status_var, anchor="w")
         status_label.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
@@ -788,7 +911,39 @@ class TerrainViewerGUI:
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
 
-    def _run(self, *, show: bool, output: Optional[Path] = None) -> None:
+    def export_objects(self) -> None:
+        output_path = filedialog.asksaveasfilename(
+            title="Exportar objetos",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+        )
+        if not output_path:
+            return
+        try:
+            self._run(show=False, export_objects=Path(output_path), render=False)
+            messagebox.showinfo("Sucesso", f"Lista exportada para {output_path}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Erro", str(exc))
+
+    def show_summary(self) -> None:
+        try:
+            result = self._run(show=False, render=False)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Erro", str(exc))
+            return
+        messagebox.showinfo(
+            "Resumo do mapa",
+            format_detailed_summary(result, object_limit=5, attribute_limit=5),
+        )
+
+    def _run(
+        self,
+        *,
+        show: bool,
+        output: Optional[Path] = None,
+        export_objects: Optional[Path] = None,
+        render: Optional[bool] = None,
+    ) -> TerrainLoadResult:
         world_path = self._current_world_path()
         if world_path is None:
             raise ValueError("Selecione uma pasta World válida.")
@@ -807,9 +962,15 @@ class TerrainViewerGUI:
             max_objects=max_objects,
             enum_path=self.enum_path,
             log_summary=False,
+            export_objects=export_objects,
+            detailed_summary=False,
+            summary_limit=5,
+            render=(render if render is not None else (show or output is not None)),
         )
         self.map_id_var.set(str(result.map_id))
         self.status_var.set(format_summary_line(result))
+        self.last_result = result
+        return result
 
     @staticmethod
     def _parse_float(value: str) -> Optional[float]:
@@ -857,6 +1018,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         dest="enum_path",
         help="Arquivo _enum.h para nomear tipos de objeto (padrão: source/_enum.h).",
     )
+    parser.add_argument(
+        "--export-objects",
+        type=Path,
+        dest="export_objects",
+        help="Salva um CSV com a lista completa de objetos posicionados no mapa.",
+    )
+    parser.add_argument(
+        "--detailed-summary",
+        action="store_true",
+        help="Mostra estatísticas adicionais (altura, atributos e texturas).",
+    )
+    parser.add_argument(
+        "--summary-limit",
+        type=int,
+        default=8,
+        help="Quantidade de entradas exibidas nos resumos de objetos.",
+    )
     args = parser.parse_args(argv)
 
     if args.gui or args.world_path is None:
@@ -874,6 +1052,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         show=not args.no_show,
         max_objects=args.max_objects,
         enum_path=args.enum_path,
+        export_objects=args.export_objects,
+        detailed_summary=args.detailed_summary,
+        summary_limit=args.summary_limit,
+        render=not args.no_show or args.output is not None,
     )
 
 
