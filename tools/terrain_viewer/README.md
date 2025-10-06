@@ -57,6 +57,9 @@ do zero e usa apenas ações comuns no Windows:
    - Use o menu suspenso para escolher o mundo (por exemplo, `World7`).
    - Pressione **Visualizar** para carregar o mapa; a janela exibirá o terreno
      e uma lista dos objetos encontrados.
+   - Para gerar relatórios rápidos, utilize os botões **Resumo** (exibe
+     estatísticas detalhadas) ou **Exportar objetos** (salva um CSV com a lista
+     completa de instâncias do mapa).
 
 > Dica: Se você quiser apenas gerar uma imagem, clique em **Salvar PNG** e
 > escolha onde guardar o arquivo. O processo leva alguns segundos em mapas
@@ -90,7 +93,10 @@ permite:
 Ao clicar em **Visualizar**, o terreno e os objetos são carregados e exibidos.
 O rodapé da janela mostra um resumo com a contagem total de objetos e os tipos
 mais frequentes (com nomes extraídos do `_enum.h` do cliente). Também é
-possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**.
+possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**. Caso
+precise analisar os dados, use **Resumo** para visualizar estatísticas (altura,
+atributos e texturas) e **Exportar objetos** para salvar um CSV com todas as
+instâncias posicionadas no mapa.
 
 ### Linha de comando
 
@@ -110,6 +116,17 @@ objetos encontrados e, se desejar, é possível apontar explicitamente para o
 arquivo `_enum.h` do cliente com `--enum-path` para que os IDs sejam convertidos
 em nomes legíveis.
 
+### Exportando e inspecionando dados
+
+- `--export-objects caminho.csv`: grava um CSV com todos os objetos, incluindo
+  posição, ângulos, escala e as coordenadas em tiles. É útil para importar a
+  lista em ferramentas externas ou planilhas.
+- `--detailed-summary`: exibe estatísticas adicionais diretamente no terminal,
+  como altura mínima/máxima, quantidade de texturas utilizadas e os atributos
+  mais comuns.
+- `--summary-limit N`: controla quantos tipos de objeto aparecem nos resumos
+  (padrão 8).
+
 ### Opções principais
 
 - `--extended-height`: força o parser do formato novo de altura (24 bits) — a
@@ -124,6 +141,9 @@ em nomes legíveis.
   por padrão, use 3.0 para o mapa de login).
 - `--enum-path`: sobrescreve o caminho padrão de `_enum.h` usado para nomear os
   modelos lidos de `EncTerrainXX.obj`.
+- `--export-objects`: salva a lista bruta de objetos em CSV.
+- `--detailed-summary`: mostra estatísticas completas no terminal.
+- `--summary-limit`: define quantos itens exibir nos resumos.
 
 ## Exemplo
 
