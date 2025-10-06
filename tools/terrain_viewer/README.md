@@ -15,7 +15,60 @@ pip install -r requirements.txt
 O arquivo `requirements.txt` na pasta contém as dependências mínimas (NumPy e
 Matplotlib).
 
+## Guia rápido para iniciantes
+
+Se você nunca executou um script em Python, siga este passo a passo. Ele parte
+do zero e usa apenas ações comuns no Windows:
+
+1. **Instale o Python**
+   - Baixe o instalador oficial em <https://www.python.org/downloads/>.
+   - Execute o instalador e marque a opção "Add Python to PATH" antes de
+     clicar em **Install Now**.
+
+2. **Prepare uma pasta de trabalho**
+   - Copie esta pasta `terrain_viewer` para um local fácil, por exemplo, sua
+     área de trabalho.
+   - Extraia os arquivos do cliente MuOnline para uma pasta como
+     `C:\MuOnline`. Dentro dela deve existir o diretório `Data` com as subpastas
+     `WorldX` (terreno) e, se disponível, `ObjectX` (objetos).
+
+3. **Abra o Prompt de Comando**
+   - Pressione `Win + R`, digite `cmd` e tecle **Enter**.
+   - No prompt, mude para a pasta do visualizador. Exemplo:
+
+     ```bat
+     cd %USERPROFILE%\Desktop\terrain_viewer
+     ```
+
+4. **Instale as dependências**
+   - Ainda no prompt, execute:
+
+     ```bat
+     python -m pip install -r requirements.txt
+     ```
+
+5. **Abra o Terrain Viewer**
+   - Execute o comando abaixo para iniciar a interface gráfica:
+
+     ```bat
+     python terrain_viewer.py --gui
+     ```
+   - Clique em **Selecionar pasta Data** e aponte para `C:\MuOnline\Data`.
+   - Use o menu suspenso para escolher o mundo (por exemplo, `World7`).
+   - Pressione **Visualizar** para carregar o mapa; a janela exibirá o terreno
+     e uma lista dos objetos encontrados.
+
+> Dica: Se você quiser apenas gerar uma imagem, clique em **Salvar PNG** e
+> escolha onde guardar o arquivo. O processo leva alguns segundos em mapas
+> grandes; aguarde até a barra de progresso chegar ao fim.
+
+6. **Feche o programa**
+   - Após explorar o mapa, clique no `X` da janela ou pressione `Esc`.
+
 ## Como usar
+
+Para usuários com experiência em linha de comando, as instruções completas
+continuam abaixo.
 
 1. Extraia os arquivos do cliente em uma pasta acessível. Você precisará do
    diretório `Data/WorldX` correspondente ao mapa que deseja visualizar com os
