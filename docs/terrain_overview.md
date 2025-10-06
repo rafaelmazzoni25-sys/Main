@@ -45,6 +45,11 @@ A chamada principal `RenderTerrain` coordena a renderização. Ela ajusta anima�
 
 Após o solo base, `RenderTerrainTile_After` e `RenderTerrainFace_After` desenham sobreposições como água transparente ou combinações de camadas, usando o alpha de mapeamento para decidir qual textura aplicar.【F:source/ZzzLodTerrain.cpp†L1526-L1697】 Finalmente, quando o gramado está ativo (`TerrainFlag == TERRAIN_MAP_GRASS`), os mesmos loops são reutilizados para renderizar o efeito animado de grama, deslocando vértices com `TerrainGrassWind` e texturas randômicas.【F:source/ZzzLodTerrain.cpp†L1499-L1517】【F:source/ZzzLodTerrain.cpp†L2494-L2499】
 
+## Ferramenta de visualização
+
+Para inspecionar rapidamente o resultado desse pipeline sem executar o cliente original, o repositório inclui o utilitário `tools/terrain_viewer/terrain_viewer.py`. Ele aplica as mesmas rotinas de descriptografia (`MapFileDecrypt` e `BuxConvert`) usadas nos carregadores de atributos, texturas e objetos, reconstrói o campo de altura e plota o terreno com os objetos estáticos em 3D utilizando Matplotlib.【F:tools/terrain_viewer/terrain_viewer.py†L1-L222】【F:tools/terrain_viewer/README.md†L1-L52】 Consulte a documentação na própria pasta da ferramenta para detalhes de uso, incluindo o suporte a diretórios `ObjectX` externos para os arquivos `EncTerrainXX.obj`.
+
+
 ## Conclusão
 
 O terreno é montado em três etapas principais: leitura dos dados (altura, atributos e texturas), geração de informações derivadas (normais e luz) e renderização otimizada com frustum culling. O uso de arrays globais para cada aspecto do terreno permite que sistemas diferentes (colisão, efeitos, UI de edição) consultem ou modifiquem os dados conforme necessário.
