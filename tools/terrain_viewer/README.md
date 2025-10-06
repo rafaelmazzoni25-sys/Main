@@ -35,7 +35,9 @@ permite:
    necessário, apontar explicitamente para uma pasta `ObjectX`.
 
 Ao clicar em **Visualizar**, o terreno e os objetos são carregados e exibidos.
-Também é possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**.
+O rodapé da janela mostra um resumo com a contagem total de objetos e os tipos
+mais frequentes (com nomes extraídos do `_enum.h` do cliente). Também é
+possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**.
 
 ### Linha de comando
 
@@ -50,7 +52,10 @@ O comando acima gera um `PNG` com a visualização e também abre a janela do
 Matplotlib. Para apenas salvar a imagem, adicione `--no-show`. Caso o ID do mapa
 não esteja presente no nome da pasta, informe manualmente com `--map-id`. Se o
 arquivo `EncTerrain*.obj` estiver armazenado em `Data/ObjectX`, use
-`--object-path /caminho/para/Data/Object1`.
+`--object-path /caminho/para/Data/Object1`. O carregamento imprime um resumo dos
+objetos encontrados e, se desejar, é possível apontar explicitamente para o
+arquivo `_enum.h` do cliente com `--enum-path` para que os IDs sejam convertidos
+em nomes legíveis.
 
 ### Opções principais
 
@@ -64,6 +69,8 @@ arquivo `EncTerrain*.obj` estiver armazenado em `Data/ObjectX`, use
 - `--output`: caminho do arquivo PNG de saída.
 - `--height-scale`: ajusta o fator aplicado ao formato clássico de altura (1.5
   por padrão, use 3.0 para o mapa de login).
+- `--enum-path`: sobrescreve o caminho padrão de `_enum.h` usado para nomear os
+  modelos lidos de `EncTerrainXX.obj`.
 
 ## Exemplo
 

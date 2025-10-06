@@ -7,12 +7,15 @@ matricial e sobrepor os objetos com Matplotlib.
 from __future__ import annotations
 
 import argparse
-
+import ast
+import functools
 import math
+import re
 import struct
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -42,6 +45,113 @@ MAP_XOR_KEY = (
 )
 G_MIN_HEIGHT = -500.0
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ENUM_PATH = REPO_ROOT / "source" / "_enum.h"
+
+MODEL_LINE_RE = re.compile(r"^(MODEL_[A-Z0-9_]+)\s*(?:=\s*([^,]+))?\s*,?$")
+CONST_LINE_RE = re.compile(r"^([A-Z0-9_]+)\s*=\s*([^,]+)\s*,?$")
+
+
+def _eval_int_expression(expr: str, env: Mapping[str, int]) -> int:
+    node = ast.parse(expr, mode="eval")
+
+    def _eval(parsed: ast.AST) -> int:
+        if isinstance(parsed, ast.Expression):
+            return _eval(parsed.body)
+        if isinstance(parsed, ast.Constant):
+            if isinstance(parsed.value, (int, float)):
+                return int(parsed.value)
+            raise ValueError(f"Valor constante inesperado: {parsed.value!r}")
+        if isinstance(parsed, ast.UnaryOp):
+            operand = _eval(parsed.operand)
+            if isinstance(parsed.op, ast.UAdd):
+                return +operand
+            if isinstance(parsed.op, ast.USub):
+                return -operand
+            raise ValueError(f"Operador unário não suportado: {parsed.op}")
+        if isinstance(parsed, ast.BinOp):
+            left = _eval(parsed.left)
+            right = _eval(parsed.right)
+            if isinstance(parsed.op, ast.Add):
+                return left + right
+            if isinstance(parsed.op, ast.Sub):
+                return left - right
+            if isinstance(parsed.op, ast.Mult):
+                return left * right
+            if isinstance(parsed.op, ast.FloorDiv):
+                return left // right
+            if isinstance(parsed.op, ast.LShift):
+                return left << right
+            if isinstance(parsed.op, ast.RShift):
+                return left >> right
+            if isinstance(parsed.op, ast.BitOr):
+                return left | right
+            if isinstance(parsed.op, ast.BitAnd):
+                return left & right
+            if isinstance(parsed.op, ast.BitXor):
+                return left ^ right
+            raise ValueError(f"Operador não suportado: {parsed.op}")
+        if isinstance(parsed, ast.Name):
+            if parsed.id not in env:
+                raise KeyError(parsed.id)
+            return int(env[parsed.id])
+        raise ValueError(f"Expressão não suportada: {ast.dump(parsed)}")
+
+    return _eval(node)
+
+
+@functools.lru_cache(maxsize=None)
+def load_model_names(enum_path: str) -> Dict[int, str]:
+    path = Path(enum_path)
+    if not path.exists():
+        return {}
+
+    env: Dict[str, int] = {"MAX_CLASS": 7}
+    names: Dict[int, str] = {}
+    current_value: Optional[int] = None
+    inside_world_section = False
+
+    with path.open(encoding="utf-8", errors="ignore") as handle:
+        for raw_line in handle:
+            line = raw_line.split("//", 1)[0].strip()
+            if not line:
+                continue
+
+            if not inside_world_section:
+                if line.startswith("MODEL_WORLD_OBJECT"):
+                    inside_world_section = True
+                else:
+                    continue
+
+            if line.startswith("//skill") or line.startswith("MODEL_SKILL_BEGIN"):
+                break
+
+            model_match = MODEL_LINE_RE.match(line)
+            if model_match:
+                name, expr = model_match.groups()
+                if expr is not None:
+                    value = _eval_int_expression(expr.strip(), env)
+                    current_value = value
+                else:
+                    if current_value is None:
+                        continue
+                    current_value += 1
+                    value = current_value
+                env[name] = value
+                names[value] = name
+                continue
+
+            const_match = CONST_LINE_RE.match(line)
+            if const_match:
+                const_name, expr = const_match.groups()
+                value = _eval_int_expression(expr.strip(), env)
+                env[const_name] = value
+                if const_name.startswith("MODEL_"):
+                    names[value] = const_name
+                current_value = value
+
+    return names
+
 
 @dataclass
 class TerrainData:
@@ -58,6 +168,23 @@ class TerrainObject:
     position: Tuple[float, float, float]
     angles: Tuple[float, float, float]
     scale: float
+    type_name: Optional[str] = None
+
+    @property
+    def tile_position(self) -> Tuple[float, float]:
+        return (self.position[0] / TERRAIN_SCALE, self.position[1] / TERRAIN_SCALE)
+
+
+@dataclass
+class TerrainLoadResult:
+    world_path: Path
+    data: TerrainData
+    objects: List[TerrainObject]
+    map_id: int
+    map_id_attribute: int
+    map_id_mapping: int
+    map_id_objects: int
+    model_names: Mapping[int, str]
 
 
 def map_file_decrypt(data: bytes) -> bytes:
@@ -85,7 +212,7 @@ def _read_file(path: Path) -> bytes:
         raise FileNotFoundError(f"Arquivo não encontrado: {path}") from exc
 
 
-def load_attribute_file(path: Path) -> np.ndarray:
+def open_terrain_attribute(path: Path) -> Tuple[int, np.ndarray]:
     raw = _read_file(path)
     decrypted = bytearray(map_file_decrypt(raw))
     bux_convert(decrypted)
@@ -97,6 +224,7 @@ def load_attribute_file(path: Path) -> np.ndarray:
         )
 
     version = decrypted[0]
+    map_id = decrypted[1]
     width = decrypted[2]
     height = decrypted[3]
     if version != 0 or width != 255 or height != 255:
@@ -111,14 +239,15 @@ def load_attribute_file(path: Path) -> np.ndarray:
     else:
         data = np.frombuffer(decrypted, dtype=np.uint16, count=TERRAIN_SIZE * TERRAIN_SIZE, offset=offset)
         attributes = data.copy()
-    return attributes.reshape((TERRAIN_SIZE, TERRAIN_SIZE))
+    return int(map_id), attributes.reshape((TERRAIN_SIZE, TERRAIN_SIZE))
 
 
-def load_mapping_file(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def open_terrain_mapping(path: Path) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray]:
     raw = _read_file(path)
     decrypted = map_file_decrypt(raw)
     ptr = 0
     ptr += 1  # versão
+    map_id = decrypted[ptr]
     ptr += 1  # número do mapa
 
     layer_count = TERRAIN_SIZE * TERRAIN_SIZE
@@ -128,7 +257,12 @@ def load_mapping_file(path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     ptr += layer_count
     alpha_bytes = decrypted[ptr : ptr + layer_count]
     alpha = np.frombuffer(alpha_bytes, dtype=np.uint8).astype(np.float32) / 255.0
-    return layer1.reshape((TERRAIN_SIZE, TERRAIN_SIZE)), layer2.reshape((TERRAIN_SIZE, TERRAIN_SIZE)), alpha.reshape((TERRAIN_SIZE, TERRAIN_SIZE))
+    return (
+        int(map_id),
+        layer1.reshape((TERRAIN_SIZE, TERRAIN_SIZE)),
+        layer2.reshape((TERRAIN_SIZE, TERRAIN_SIZE)),
+        alpha.reshape((TERRAIN_SIZE, TERRAIN_SIZE)),
+    )
 
 
 def load_height_file(path: Path, *, extended: bool = False, scale_override: Optional[float] = None) -> np.ndarray:
@@ -159,11 +293,12 @@ def load_height_file(path: Path, *, extended: bool = False, scale_override: Opti
     return heights.reshape((TERRAIN_SIZE, TERRAIN_SIZE))
 
 
-def load_objects_file(path: Path) -> List[TerrainObject]:
+def open_objects_enc(path: Path, model_names: Mapping[int, str]) -> Tuple[int, List[TerrainObject]]:
     raw = _read_file(path)
     decrypted = map_file_decrypt(raw)
     ptr = 0
     ptr += 1  # versão
+    map_id = decrypted[ptr]
     ptr += 1  # número do mapa
     count = struct.unpack_from("<h", decrypted, ptr)[0]
     ptr += 2
@@ -183,9 +318,10 @@ def load_objects_file(path: Path) -> List[TerrainObject]:
                 position=(position[0], position[1], position[2]),
                 angles=(angles[0], angles[1], angles[2]),
                 scale=scale,
+                type_name=model_names.get(type_id),
             )
         )
-    return objects
+    return int(map_id), objects
 
 
 def bilinear_height(height: np.ndarray, x: float, y: float) -> float:
@@ -207,6 +343,7 @@ def render_scene(
     output: Optional[Path],
     show: bool,
     max_objects: Optional[int],
+    title: Optional[str] = None,
 ) -> None:
     x = np.arange(TERRAIN_SIZE)
     y = np.arange(TERRAIN_SIZE)
@@ -233,15 +370,22 @@ def render_scene(
 
     if objects:
         used_objects = objects[:max_objects] if max_objects is not None else objects
-        ox = np.array([obj.position[0] / TERRAIN_SCALE for obj in used_objects])
-        oy = np.array([obj.position[1] / TERRAIN_SCALE for obj in used_objects])
+        ox = np.array([obj.tile_position[0] for obj in used_objects])
+        oy = np.array([obj.tile_position[1] for obj in used_objects])
         oz = np.array([bilinear_height(heights, x, y) for x, y in zip(ox, oy)])
-        ax.scatter(ox, oy, oz + 50.0, c="red", s=10, depthshade=False)
+        type_ids = np.array([obj.type_id for obj in used_objects], dtype=float)
+        if type_ids.size > 0 and type_ids.ptp() > 0:
+            colors = (type_ids - type_ids.min()) / type_ids.ptp()
+        else:
+            colors = np.zeros_like(type_ids)
+        ax.scatter(ox, oy, oz + 50.0, c=colors, cmap="tab20", s=10, depthshade=False)
 
     ax.set_xlabel("X (tiles)")
     ax.set_ylabel("Y (tiles)")
     ax.set_zlabel("Altura")
     ax.view_init(elev=60, azim=45)
+    if title:
+        ax.set_title(title)
     plt.tight_layout()
 
     if output:
@@ -333,6 +477,106 @@ def resolve_files(
     return attributes, mapping, objects, height
 
 
+def load_world_data(
+    world_path: Path,
+    *,
+    map_id: Optional[int],
+    object_path: Optional[Path],
+    extended_height: bool,
+    height_scale: Optional[float],
+    enum_path: Optional[Path],
+) -> TerrainLoadResult:
+    if not world_path.is_dir():
+        raise FileNotFoundError(f"Diretório inválido: {world_path}")
+
+    attributes_path, mapping_path, objects_path, height_path = resolve_files(
+        world_path, map_id, object_path=object_path
+    )
+
+    enum_candidate = enum_path
+    if enum_candidate is None:
+        if DEFAULT_ENUM_PATH.exists():
+            enum_candidate = DEFAULT_ENUM_PATH
+    model_names: Mapping[int, str] = {}
+    if enum_candidate and enum_candidate.exists():
+        model_names = load_model_names(str(enum_candidate.resolve()))
+
+    attr_map_id, attributes = open_terrain_attribute(attributes_path)
+    mapping_map_id, layer1, layer2, alpha = open_terrain_mapping(mapping_path)
+    obj_map_id, objects = open_objects_enc(objects_path, model_names)
+    height = load_height_file(
+        height_path,
+        extended=extended_height or height_path.name.endswith("New.OZB"),
+        scale_override=height_scale,
+    )
+
+    terrain = TerrainData(
+        height=height,
+        mapping_layer1=layer1,
+        mapping_layer2=layer2,
+        mapping_alpha=alpha,
+        attributes=attributes,
+    )
+
+    resolved_map_id: Optional[int] = None
+    id_sources = [
+        ("parâmetro", map_id),
+        ("EncTerrain.map", mapping_map_id),
+        ("EncTerrain.att", attr_map_id),
+        ("EncTerrain.obj", obj_map_id),
+    ]
+    for label, value in id_sources:
+        if value is None:
+            continue
+        if resolved_map_id is None:
+            resolved_map_id = value
+        elif value != resolved_map_id:
+            raise ValueError(
+                f"ID do mapa inconsistente: {label} aponta para {value},"
+                f" mas o esperado é {resolved_map_id}."
+            )
+
+    if resolved_map_id is None:
+        resolved_map_id = 0
+
+    return TerrainLoadResult(
+        world_path=world_path,
+        data=terrain,
+        objects=objects,
+        map_id=resolved_map_id,
+        map_id_attribute=attr_map_id,
+        map_id_mapping=mapping_map_id,
+        map_id_objects=obj_map_id,
+        model_names=model_names,
+    )
+
+
+def object_summary(result: TerrainLoadResult, *, limit: int = 8) -> List[Tuple[int, int, Optional[str]]]:
+    counter = Counter(obj.type_id for obj in result.objects)
+    summary: List[Tuple[int, int, Optional[str]]] = []
+    for type_id, count in counter.most_common(limit):
+        summary.append((type_id, count, result.model_names.get(type_id)))
+    return summary
+
+
+def format_summary_line(result: TerrainLoadResult, *, limit: int = 5) -> str:
+    pieces = [
+        f"Mapa {result.map_id}",
+        f"{len(result.objects)} objetos",
+    ]
+    highlights = []
+    for type_id, count, name in object_summary(result, limit=limit):
+        label = name.replace("MODEL_", "") if name else "ID"
+        highlights.append(f"{count}× {label} ({type_id})")
+    if highlights:
+        pieces.append("principais: " + ", ".join(highlights))
+    return " | ".join(pieces)
+
+
+def print_summary(result: TerrainLoadResult, *, limit: int = 8) -> None:
+    print(format_summary_line(result, limit=limit))
+
+
 def run_viewer(
     world_path: Path,
     *,
@@ -343,38 +587,30 @@ def run_viewer(
     output: Optional[Path],
     show: bool,
     max_objects: Optional[int],
-) -> None:
-    if not world_path.is_dir():
-        raise FileNotFoundError(f"Diretório inválido: {world_path}")
-
-    attributes_path, mapping_path, objects_path, height_path = resolve_files(
-        world_path, map_id, object_path=object_path
-    )
-
-    attributes = load_attribute_file(attributes_path)
-    layer1, layer2, alpha = load_mapping_file(mapping_path)
-    height = load_height_file(
-        height_path,
-        extended=extended_height or height_path.name.endswith("New.OZB"),
-        scale_override=height_scale,
-    )
-    objects = load_objects_file(objects_path)
-
-    terrain = TerrainData(
-        height=height,
-        mapping_layer1=layer1,
-        mapping_layer2=layer2,
-        mapping_alpha=alpha,
-        attributes=attributes,
+    enum_path: Optional[Path] = None,
+    log_summary: bool = True,
+) -> TerrainLoadResult:
+    result = load_world_data(
+        world_path,
+        map_id=map_id,
+        object_path=object_path,
+        extended_height=extended_height,
+        height_scale=height_scale,
+        enum_path=enum_path,
     )
 
     render_scene(
-        terrain,
-        objects,
+        result.data,
+        result.objects,
         output=output,
         show=show,
         max_objects=max_objects,
+        title=f"{world_path.name} (mapa {result.map_id}) — {len(result.objects)} objetos",
     )
+
+    if log_summary:
+        print_summary(result)
+    return result
 
 
 def list_world_directories(data_path: Path) -> List[Path]:
@@ -404,7 +640,12 @@ def _safe_int(value: str) -> Optional[int]:
 
 
 class TerrainViewerGUI:
-    def __init__(self, *, initial_data_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        *,
+        initial_data_dir: Optional[Path] = None,
+        enum_path: Optional[Path] = None,
+    ):
         self.root = tk.Tk()
         self.root.title("Visualizador de Terreno")
 
@@ -416,8 +657,14 @@ class TerrainViewerGUI:
         self.extended_height_var = tk.BooleanVar()
 
         self.object_dir_var = tk.StringVar()
+        self.status_var = tk.StringVar()
 
         self.world_options: List[Path] = []
+        self.enum_path = None
+        if enum_path and enum_path.exists():
+            self.enum_path = enum_path
+        elif DEFAULT_ENUM_PATH.exists():
+            self.enum_path = DEFAULT_ENUM_PATH
 
         if initial_data_dir and initial_data_dir.is_dir():
             self.data_dir_var.set(str(initial_data_dir))
@@ -473,6 +720,11 @@ class TerrainViewerGUI:
         tk.Button(buttons_frame, text="Visualizar", command=self.visualize).grid(row=0, column=0, padx=4)
         tk.Button(buttons_frame, text="Salvar PNG", command=self.save_png).grid(row=0, column=1, padx=4)
         tk.Button(buttons_frame, text="Sair", command=self.root.quit).grid(row=0, column=2, padx=4)
+
+        status_label = tk.Label(self.root, textvariable=self.status_var, anchor="w")
+        status_label.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+
+        self.root.columnconfigure(0, weight=1)
 
     def choose_data_dir(self) -> None:
         path = filedialog.askdirectory(title="Selecione a pasta Data")
@@ -544,7 +796,7 @@ class TerrainViewerGUI:
         height_scale = self._parse_float(self.height_scale_var.get())
         max_objects = _safe_int(self.max_objects_var.get())
         object_dir = Path(self.object_dir_var.get()) if self.object_dir_var.get() else None
-        run_viewer(
+        result = run_viewer(
             world_path,
             map_id=map_id,
             object_path=object_dir,
@@ -553,7 +805,11 @@ class TerrainViewerGUI:
             output=output,
             show=show,
             max_objects=max_objects,
+            enum_path=self.enum_path,
+            log_summary=False,
         )
+        self.map_id_var.set(str(result.map_id))
+        self.status_var.set(format_summary_line(result))
 
     @staticmethod
     def _parse_float(value: str) -> Optional[float]:
@@ -595,10 +851,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Fator de escala aplicado às alturas no formato clássico (padrão 1.5).",
     )
     parser.add_argument("--gui", action="store_true", help="Abre a interface gráfica de seleção de mapas.")
+    parser.add_argument(
+        "--enum-path",
+        type=Path,
+        dest="enum_path",
+        help="Arquivo _enum.h para nomear tipos de objeto (padrão: source/_enum.h).",
+    )
     args = parser.parse_args(argv)
 
     if args.gui or args.world_path is None:
-        app = TerrainViewerGUI(initial_data_dir=args.data_root)
+        app = TerrainViewerGUI(initial_data_dir=args.data_root, enum_path=args.enum_path)
         app.run()
         return
 
@@ -611,6 +873,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         output=args.output,
         show=not args.no_show,
         max_objects=args.max_objects,
+        enum_path=args.enum_path,
     )
 
 
