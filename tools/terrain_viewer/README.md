@@ -15,7 +15,65 @@ pip install -r requirements.txt
 O arquivo `requirements.txt` na pasta contém as dependências mínimas (NumPy e
 Matplotlib).
 
+## Guia rápido para iniciantes
+
+Se você nunca executou um script em Python, siga este passo a passo. Ele parte
+do zero e usa apenas ações comuns no Windows:
+
+1. **Instale o Python**
+   - Baixe o instalador oficial em <https://www.python.org/downloads/>.
+   - Execute o instalador e marque a opção "Add Python to PATH" antes de
+     clicar em **Install Now**.
+
+2. **Prepare uma pasta de trabalho**
+   - Copie esta pasta `terrain_viewer` para um local fácil, por exemplo, sua
+     área de trabalho.
+   - Extraia os arquivos do cliente MuOnline para uma pasta como
+     `C:\MuOnline`. Dentro dela deve existir o diretório `Data` com as subpastas
+     `WorldX` (terreno) e, se disponível, `ObjectX` (objetos).
+
+3. **Abra o Prompt de Comando**
+   - Pressione `Win + R`, digite `cmd` e tecle **Enter**.
+   - No prompt, mude para a pasta do visualizador. Exemplo:
+
+     ```bat
+     cd %USERPROFILE%\Desktop\terrain_viewer
+     ```
+
+4. **Instale as dependências**
+   - Ainda no prompt, execute:
+
+     ```bat
+     python -m pip install -r requirements.txt
+     ```
+
+5. **Abra o Terrain Viewer**
+   - Execute o comando abaixo para iniciar a interface gráfica:
+
+     ```bat
+     python terrain_viewer.py --gui
+     ```
+   - Clique em **Selecionar pasta Data** e aponte para `C:\MuOnline\Data`.
+   - Use o menu suspenso para escolher o mundo (por exemplo, `World7`). O campo
+     **Pasta Object** será preenchido automaticamente com a pasta `ObjectX`
+     correspondente quando encontrada.
+   - Pressione **Visualizar** para carregar o mapa; a janela exibirá o terreno
+     e uma lista dos objetos encontrados.
+   - Para gerar relatórios rápidos, utilize os botões **Resumo** (exibe
+     estatísticas detalhadas) ou **Exportar objetos** (salva um CSV com a lista
+     completa de instâncias do mapa).
+
+> Dica: Se você quiser apenas gerar uma imagem, clique em **Salvar PNG** e
+> escolha onde guardar o arquivo. O processo leva alguns segundos em mapas
+> grandes; aguarde até a barra de progresso chegar ao fim.
+
+6. **Feche o programa**
+   - Após explorar o mapa, clique no `X` da janela ou pressione `Esc`.
+
 ## Como usar
+
+Para usuários com experiência em linha de comando, as instruções completas
+continuam abaixo.
 
 1. Extraia os arquivos do cliente em uma pasta acessível. Você precisará do
    diretório `Data/WorldX` correspondente ao mapa que deseja visualizar com os
@@ -37,7 +95,10 @@ permite:
 Ao clicar em **Visualizar**, o terreno e os objetos são carregados e exibidos.
 O rodapé da janela mostra um resumo com a contagem total de objetos e os tipos
 mais frequentes (com nomes extraídos do `_enum.h` do cliente). Também é
-possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**.
+possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**. Caso
+precise analisar os dados, use **Resumo** para visualizar estatísticas (altura,
+atributos e texturas) e **Exportar objetos** para salvar um CSV com todas as
+instâncias posicionadas no mapa.
 
 ### Linha de comando
 
@@ -57,6 +118,17 @@ objetos encontrados e, se desejar, é possível apontar explicitamente para o
 arquivo `_enum.h` do cliente com `--enum-path` para que os IDs sejam convertidos
 em nomes legíveis.
 
+### Exportando e inspecionando dados
+
+- `--export-objects caminho.csv`: grava um CSV com todos os objetos, incluindo
+  posição, ângulos, escala e as coordenadas em tiles. É útil para importar a
+  lista em ferramentas externas ou planilhas.
+- `--detailed-summary`: exibe estatísticas adicionais diretamente no terminal,
+  como altura mínima/máxima, quantidade de texturas utilizadas e os atributos
+  mais comuns.
+- `--summary-limit N`: controla quantos tipos de objeto aparecem nos resumos
+  (padrão 8).
+
 ### Opções principais
 
 - `--extended-height`: força o parser do formato novo de altura (24 bits) — a
@@ -71,6 +143,19 @@ em nomes legíveis.
   por padrão, use 3.0 para o mapa de login).
 - `--enum-path`: sobrescreve o caminho padrão de `_enum.h` usado para nomear os
   modelos lidos de `EncTerrainXX.obj`.
+- `--export-objects`: salva a lista bruta de objetos em CSV.
+- `--detailed-summary`: mostra estatísticas completas no terminal.
+- `--summary-limit`: define quantos itens exibir nos resumos.
+
+### Erros comuns
+
+- **"Arquivo de altura (formato clássico) truncado."** – Esse aviso aparece
+  quando o `TerrainHeight.OZB` encontrado é apenas um placeholder pequeno que
+  acompanha alguns clientes modernos. Nesses casos o arquivo real está em
+  `TerrainHeightNew.OZB`. A partir da versão atual o visualizador troca
+  automaticamente para o formato novo sempre que detecta esse placeholder, mas
+  se você estiver usando uma versão antiga basta marcar a opção **Forçar
+  TerrainHeightNew** na interface (ou executar com `--extended-height`).
 
 ## Exemplo
 

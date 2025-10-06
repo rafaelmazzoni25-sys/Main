@@ -20,7 +20,7 @@ Os índices dos tiles são calculados por utilitários como `TERRAIN_INDEX` (ind
 
 ### Altura
 
-`CreateTerrain` ativa o terreno e decide qual rotina de leitura usar (`OpenTerrainHeight` ou `OpenTerrainHeightNew`) conforme o formato do arquivo. No fim, chama `CreateSun` para preparar objetos visuais relacionados.【F:source/ZzzLodTerrain.cpp†L485-L499】
+`CreateTerrain` ativa o terreno e decide qual rotina de leitura usar (`OpenTerrainHeight` ou `OpenTerrainHeightNew`) conforme o formato do arquivo. No fim, chama `CreateSun` para preparar objetos visuais relacionados.【F:source/ZzzLodTerrain.cpp†L485-L499】 Uma análise detalhada do caminho clássico está em [`terrain_height_classic.md`](./terrain_height_classic.md).
 
 * **Formato clássico:** `OpenTerrainHeight` lê um BMP compactado (`*.OZB`), copia o cabeçalho e converte cada pixel em altura, com um fator de escala diferente para o mapa de login.【F:source/ZzzLodTerrain.cpp†L513-L563】
 * **Formato estendido:** `OpenTerrainHeightNew` lê alturas codificadas em 24 bits, deslocando-as para o intervalo real adicionando `g_fMinHeight`. Esse formato cobre mapas novos/estendidos.【F:source/ZzzLodTerrain.cpp†L596-L639】
