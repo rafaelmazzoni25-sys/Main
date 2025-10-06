@@ -54,7 +54,9 @@ do zero e usa apenas ações comuns no Windows:
      python terrain_viewer.py --gui
      ```
    - Clique em **Selecionar pasta Data** e aponte para `C:\MuOnline\Data`.
-   - Use o menu suspenso para escolher o mundo (por exemplo, `World7`).
+   - Use o menu suspenso para escolher o mundo (por exemplo, `World7`). O campo
+     **Pasta Object** será preenchido automaticamente com a pasta `ObjectX`
+     correspondente quando encontrada.
    - Pressione **Visualizar** para carregar o mapa; a janela exibirá o terreno
      e uma lista dos objetos encontrados.
    - Para gerar relatórios rápidos, utilize os botões **Resumo** (exibe

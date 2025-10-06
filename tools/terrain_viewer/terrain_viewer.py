@@ -883,6 +883,11 @@ class TerrainViewerGUI:
         inferred = infer_map_id(world_path)
         if inferred is not None:
             self.map_id_var.set(str(inferred))
+        object_guess = guess_object_folder(world_path)
+        if object_guess is not None:
+            self.object_dir_var.set(str(object_guess))
+        else:
+            self.object_dir_var.set("")
 
     def _current_world_path(self) -> Optional[Path]:
         selected = self.world_var.get()
