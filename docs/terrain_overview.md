@@ -49,6 +49,7 @@ Após o solo base, `RenderTerrainTile_After` e `RenderTerrainFace_After` desenha
 
 Para inspecionar rapidamente o resultado desse pipeline sem executar o cliente original, o repositório inclui o utilitário `tools/terrain_viewer/terrain_viewer.py`. Ele aplica as mesmas rotinas de descriptografia (`MapFileDecrypt` e `BuxConvert`) usadas nos carregadores de atributos, texturas e objetos, reconstrói o campo de altura e plota o terreno com os objetos estáticos em 3D utilizando Matplotlib.【F:tools/terrain_viewer/terrain_viewer.py†L1-L222】【F:tools/terrain_viewer/README.md†L1-L52】 Consulte a documentação na própria pasta da ferramenta para detalhes de uso, incluindo o suporte a diretórios `ObjectX` externos para os arquivos `EncTerrainXX.obj`.
 
+
 ## Conclusão
 
 O terreno é montado em três etapas principais: leitura dos dados (altura, atributos e texturas), geração de informações derivadas (normais e luz) e renderização otimizada com frustum culling. O uso de arrays globais para cada aspecto do terreno permite que sistemas diferentes (colisão, efeitos, UI de edição) consultem ou modifiquem os dados conforme necessário.
