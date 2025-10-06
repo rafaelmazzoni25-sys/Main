@@ -469,7 +469,14 @@ def resolve_files(
             " Informe --object-path para apontar para a pasta ObjectX correta."
         )
 
+    classic_min_size = 4 + 1080 + TERRAIN_SIZE * TERRAIN_SIZE
+    extended_min_size = 4 + 54 + TERRAIN_SIZE * TERRAIN_SIZE * 3
+
     height = world_path / "TerrainHeight.OZB"
+    if height.exists() and height.stat().st_size < classic_min_size:
+        alt_height = world_path / "TerrainHeightNew.OZB"
+        if alt_height.exists() and alt_height.stat().st_size >= extended_min_size:
+            height = alt_height
     if not height.exists():
         height = world_path / "TerrainHeightNew.OZB"
     if not height.exists():

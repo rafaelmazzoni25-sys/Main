@@ -147,6 +147,16 @@ em nomes legíveis.
 - `--detailed-summary`: mostra estatísticas completas no terminal.
 - `--summary-limit`: define quantos itens exibir nos resumos.
 
+### Erros comuns
+
+- **"Arquivo de altura (formato clássico) truncado."** – Esse aviso aparece
+  quando o `TerrainHeight.OZB` encontrado é apenas um placeholder pequeno que
+  acompanha alguns clientes modernos. Nesses casos o arquivo real está em
+  `TerrainHeightNew.OZB`. A partir da versão atual o visualizador troca
+  automaticamente para o formato novo sempre que detecta esse placeholder, mas
+  se você estiver usando uma versão antiga basta marcar a opção **Forçar
+  TerrainHeightNew** na interface (ou executar com `--extended-height`).
+
 ## Exemplo
 
 ```bash
