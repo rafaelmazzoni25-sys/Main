@@ -16,6 +16,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 TERRAIN_SIZE = 256
 TERRAIN_SCALE = 100.0
@@ -198,7 +200,14 @@ def bilinear_height(height: np.ndarray, x: float, y: float) -> float:
     return h1 * (1 - xd) + h2 * xd
 
 
-def render_scene(data: TerrainData, objects: Sequence[TerrainObject], *, output: Optional[Path], show: bool, max_objects: Optional[int]) -> None:
+def render_scene(
+    data: TerrainData,
+    objects: Sequence[TerrainObject],
+    *,
+    output: Optional[Path],
+    show: bool,
+    max_objects: Optional[int],
+) -> None:
     x = np.arange(TERRAIN_SIZE)
     y = np.arange(TERRAIN_SIZE)
     xx, yy = np.meshgrid(x, y)
@@ -324,41 +333,30 @@ def resolve_files(
     return attributes, mapping, objects, height
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    parser = argparse.ArgumentParser(description="Visualizador de terreno legado")
-    parser.add_argument("world_path", type=Path, help="Pasta Data/WorldX com os arquivos do mapa")
-    parser.add_argument("--map-id", type=int, dest="map_id", help="ID numérico usado nos arquivos EncTerrain")
-    parser.add_argument(
-        "--object-path",
-        type=Path,
-        dest="object_path",
-        help="Diretório ObjectX a ser usado para carregar EncTerrainXX.obj",
-    )
-    parser.add_argument("--extended-height", action="store_true", help="Força o parse do formato estendido de altura")
-    parser.add_argument("--output", type=Path, help="Arquivo de saída (PNG). Se omitido, não salva.")
-    parser.add_argument("--no-show", action="store_true", help="Não abrir a janela interativa do Matplotlib")
-    parser.add_argument("--max-objects", type=int, help="Limita quantidade de objetos renderizados")
-    parser.add_argument(
-        "--height-scale",
-        type=float,
-        help="Fator de escala aplicado às alturas no formato clássico (padrão 1.5).",
-    )
-    args = parser.parse_args(argv)
-
-    world_path = args.world_path
+def run_viewer(
+    world_path: Path,
+    *,
+    map_id: Optional[int],
+    object_path: Optional[Path],
+    extended_height: bool,
+    height_scale: Optional[float],
+    output: Optional[Path],
+    show: bool,
+    max_objects: Optional[int],
+) -> None:
     if not world_path.is_dir():
         raise FileNotFoundError(f"Diretório inválido: {world_path}")
 
     attributes_path, mapping_path, objects_path, height_path = resolve_files(
-        world_path, args.map_id, object_path=args.object_path
+        world_path, map_id, object_path=object_path
     )
 
     attributes = load_attribute_file(attributes_path)
     layer1, layer2, alpha = load_mapping_file(mapping_path)
     height = load_height_file(
         height_path,
-        extended=args.extended_height or height_path.name.endswith("New.OZB"),
-        scale_override=args.height_scale,
+        extended=extended_height or height_path.name.endswith("New.OZB"),
+        scale_override=height_scale,
     )
     objects = load_objects_file(objects_path)
 
@@ -373,6 +371,243 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     render_scene(
         terrain,
         objects,
+        output=output,
+        show=show,
+        max_objects=max_objects,
+    )
+
+
+def list_world_directories(data_path: Path) -> List[Path]:
+    worlds: List[Path] = []
+    if not data_path.is_dir():
+        return worlds
+    for child in sorted(data_path.iterdir()):
+        if not child.is_dir():
+            continue
+        lower = child.name.lower()
+        if lower.startswith("world") and find_first("EncTerrain*.map", child):
+            worlds.append(child)
+            continue
+        if find_first("EncTerrain*.map", child):
+            worlds.append(child)
+    return worlds
+
+
+def _safe_int(value: str) -> Optional[int]:
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+class TerrainViewerGUI:
+    def __init__(self, *, initial_data_dir: Optional[Path] = None):
+        self.root = tk.Tk()
+        self.root.title("Visualizador de Terreno")
+
+        self.data_dir_var = tk.StringVar()
+        self.world_var = tk.StringVar()
+        self.map_id_var = tk.StringVar()
+        self.height_scale_var = tk.StringVar()
+        self.max_objects_var = tk.StringVar()
+        self.extended_height_var = tk.BooleanVar()
+
+        self.object_dir_var = tk.StringVar()
+
+        self.world_options: List[Path] = []
+
+        if initial_data_dir and initial_data_dir.is_dir():
+            self.data_dir_var.set(str(initial_data_dir))
+            self._populate_worlds(initial_data_dir)
+
+        self._build_layout()
+
+    def _build_layout(self) -> None:
+        padding = {"padx": 8, "pady": 4}
+
+        data_frame = tk.LabelFrame(self.root, text="Diretórios")
+        data_frame.grid(row=0, column=0, sticky="ew", **padding)
+
+        tk.Label(data_frame, text="Pasta Data:").grid(row=0, column=0, sticky="w")
+        data_entry = tk.Entry(data_frame, textvariable=self.data_dir_var, width=50)
+        data_entry.grid(row=0, column=1, sticky="ew", padx=(4, 4))
+        tk.Button(data_frame, text="Escolher...", command=self.choose_data_dir).grid(row=0, column=2)
+
+        tk.Label(data_frame, text="Pasta World:").grid(row=1, column=0, sticky="w")
+        self.world_menu = tk.OptionMenu(data_frame, self.world_var, "")
+        self.world_menu.config(width=45)
+        self.world_menu.grid(row=1, column=1, sticky="ew", padx=(4, 4))
+        tk.Button(data_frame, text="Atualizar", command=self.refresh_worlds).grid(row=1, column=2)
+
+        tk.Label(data_frame, text="Pasta Object (opcional):").grid(row=2, column=0, sticky="w")
+        object_entry = tk.Entry(data_frame, textvariable=self.object_dir_var, width=50)
+        object_entry.grid(row=2, column=1, sticky="ew", padx=(4, 4))
+        tk.Button(data_frame, text="Escolher...", command=self.choose_object_dir).grid(row=2, column=2)
+
+        data_frame.columnconfigure(1, weight=1)
+
+        options_frame = tk.LabelFrame(self.root, text="Opções")
+        options_frame.grid(row=1, column=0, sticky="ew", **padding)
+
+        tk.Label(options_frame, text="Map ID:").grid(row=0, column=0, sticky="w")
+        tk.Entry(options_frame, textvariable=self.map_id_var, width=10).grid(row=0, column=1, sticky="w")
+
+        tk.Label(options_frame, text="Height scale:").grid(row=0, column=2, sticky="w")
+        tk.Entry(options_frame, textvariable=self.height_scale_var, width=10).grid(row=0, column=3, sticky="w")
+
+        tk.Label(options_frame, text="Max objects:").grid(row=1, column=0, sticky="w")
+        tk.Entry(options_frame, textvariable=self.max_objects_var, width=10).grid(row=1, column=1, sticky="w")
+
+        tk.Checkbutton(
+            options_frame,
+            text="Forçar TerrainHeightNew",
+            variable=self.extended_height_var,
+        ).grid(row=1, column=2, columnspan=2, sticky="w")
+
+        buttons_frame = tk.Frame(self.root)
+        buttons_frame.grid(row=2, column=0, sticky="e", **padding)
+
+        tk.Button(buttons_frame, text="Visualizar", command=self.visualize).grid(row=0, column=0, padx=4)
+        tk.Button(buttons_frame, text="Salvar PNG", command=self.save_png).grid(row=0, column=1, padx=4)
+        tk.Button(buttons_frame, text="Sair", command=self.root.quit).grid(row=0, column=2, padx=4)
+
+    def choose_data_dir(self) -> None:
+        path = filedialog.askdirectory(title="Selecione a pasta Data")
+        if path:
+            self.data_dir_var.set(path)
+            self._populate_worlds(Path(path))
+
+    def choose_object_dir(self) -> None:
+        path = filedialog.askdirectory(title="Selecione a pasta ObjectX")
+        if path:
+            self.object_dir_var.set(path)
+
+    def refresh_worlds(self) -> None:
+        data_path = Path(self.data_dir_var.get())
+        if not data_path.exists():
+            messagebox.showerror("Erro", "Selecione uma pasta Data válida.")
+            return
+        self._populate_worlds(data_path)
+
+    def _populate_worlds(self, data_path: Path) -> None:
+        self.world_options = list_world_directories(data_path)
+        menu = self.world_menu["menu"]
+        menu.delete(0, "end")
+        if not self.world_options:
+            self.world_var.set("")
+            return
+        for world in self.world_options:
+            menu.add_command(label=world.name, command=lambda w=world: self._select_world(w))
+        self._select_world(self.world_options[0])
+
+    def _select_world(self, world_path: Path) -> None:
+        self.world_var.set(world_path.name)
+        inferred = infer_map_id(world_path)
+        if inferred is not None:
+            self.map_id_var.set(str(inferred))
+
+    def _current_world_path(self) -> Optional[Path]:
+        selected = self.world_var.get()
+        if not selected:
+            return None
+        data_path = Path(self.data_dir_var.get())
+        return data_path / selected
+
+    def visualize(self) -> None:
+        try:
+            self._run(show=True)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Erro", str(exc))
+
+    def save_png(self) -> None:
+        output_path = filedialog.asksaveasfilename(
+            title="Salvar visualização",
+            defaultextension=".png",
+            filetypes=[("PNG", "*.png")],
+        )
+        if not output_path:
+            return
+        try:
+            self._run(show=False, output=Path(output_path))
+            messagebox.showinfo("Sucesso", f"PNG salvo em {output_path}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Erro", str(exc))
+
+    def _run(self, *, show: bool, output: Optional[Path] = None) -> None:
+        world_path = self._current_world_path()
+        if world_path is None:
+            raise ValueError("Selecione uma pasta World válida.")
+        map_id = _safe_int(self.map_id_var.get())
+        height_scale = self._parse_float(self.height_scale_var.get())
+        max_objects = _safe_int(self.max_objects_var.get())
+        object_dir = Path(self.object_dir_var.get()) if self.object_dir_var.get() else None
+        run_viewer(
+            world_path,
+            map_id=map_id,
+            object_path=object_dir,
+            extended_height=self.extended_height_var.get(),
+            height_scale=height_scale,
+            output=output,
+            show=show,
+            max_objects=max_objects,
+        )
+
+    @staticmethod
+    def _parse_float(value: str) -> Optional[float]:
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError("Height scale inválido.")
+
+    def run(self) -> None:
+        self.root.mainloop()
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Visualizador de terreno legado")
+    parser.add_argument("world_path", nargs="?", type=Path, help="Pasta Data/WorldX com os arquivos do mapa")
+    parser.add_argument("--map-id", type=int, dest="map_id", help="ID numérico usado nos arquivos EncTerrain")
+    parser.add_argument(
+        "--object-path",
+        type=Path,
+        dest="object_path",
+        help="Diretório ObjectX a ser usado para carregar EncTerrainXX.obj",
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        dest="data_root",
+        help="Pasta Data contendo subpastas WorldX/ObjectX (usada para a interface gráfica).",
+    )
+    parser.add_argument("--extended-height", action="store_true", help="Força o parse do formato estendido de altura")
+    parser.add_argument("--output", type=Path, help="Arquivo de saída (PNG). Se omitido, não salva.")
+    parser.add_argument("--no-show", action="store_true", help="Não abrir a janela interativa do Matplotlib")
+    parser.add_argument("--max-objects", type=int, help="Limita quantidade de objetos renderizados")
+    parser.add_argument(
+        "--height-scale",
+        type=float,
+        help="Fator de escala aplicado às alturas no formato clássico (padrão 1.5).",
+    )
+    parser.add_argument("--gui", action="store_true", help="Abre a interface gráfica de seleção de mapas.")
+    args = parser.parse_args(argv)
+
+    if args.gui or args.world_path is None:
+        app = TerrainViewerGUI(initial_data_dir=args.data_root)
+        app.run()
+        return
+
+    run_viewer(
+        args.world_path,
+        map_id=args.map_id,
+        object_path=args.object_path,
+        extended_height=args.extended_height,
+        height_scale=args.height_scale,
         output=args.output,
         show=not args.no_show,
         max_objects=args.max_objects,

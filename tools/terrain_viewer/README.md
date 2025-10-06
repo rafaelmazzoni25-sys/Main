@@ -22,8 +22,25 @@ Matplotlib).
    arquivos `EncTerrain*.att`, `EncTerrain*.map` e `TerrainHeight.OZB` (ou
    `TerrainHeightNew.OZB`). Se os objetos estiverem separados em `Data/ObjectX`,
    mantenha essa pasta acessível também.
-2. Execute o script apontando para a pasta `WorldX` (e opcionalmente informe a
-   pasta `ObjectX` com `--object-path`):
+
+### Interface gráfica
+
+Execute o script sem argumentos (ou com `--gui`) para abrir uma janela que
+permite:
+
+1. Escolher a pasta `Data` por meio de um seletor de diretórios.
+2. Selecionar qual `WorldX` carregar usando um drop-down preenchido
+   automaticamente com base na pasta escolhida.
+3. Ajustar opções como `Map ID`, escala de altura, limite de objetos e, se
+   necessário, apontar explicitamente para uma pasta `ObjectX`.
+
+Ao clicar em **Visualizar**, o terreno e os objetos são carregados e exibidos.
+Também é possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**.
+
+### Linha de comando
+
+Caso prefira o modo tradicional, execute o script apontando para a pasta
+`WorldX` (e opcionalmente informe a pasta `ObjectX` com `--object-path`):
 
 ```bash
 python terrain_viewer.py /caminho/para/Data/World1 --output world1.png
@@ -37,7 +54,8 @@ arquivo `EncTerrain*.obj` estiver armazenado em `Data/ObjectX`, use
 
 ### Opções principais
 
-- `--extended-height`: força o parser do formato novo de altura (24 bits).
+- `--extended-height`: força o parser do formato novo de altura (24 bits) — a
+  mesma rotina `OpenTerrainHeightNew` usada pelo cliente.
 - `--max-objects`: limita a quantidade de objetos renderizados (útil em mapas
   com milhares de instâncias).
 - `--object-path`: aponta diretamente para a pasta `ObjectX` quando os objetos
@@ -55,5 +73,8 @@ python terrain_viewer.py /caminho/para/Data/World7 --max-objects 500 --output wo
 
 O script decodifica os arquivos criptografados usando as mesmas rotinas inline
 (`MapFileDecrypt` e `BuxConvert`) vistas em `source/ZzzLodTerrain.cpp` e
-`source/ZzzObject.cpp`, garantindo que os dados exibidos reproduzam o terreno do
-cliente original.
+`source/ZzzObject.cpp`. O arquivo `EncTerrainXX.obj` é interpretado exatamente
+como no cliente: cada entrada informa o `type_id`, posição (`x`, `y`, `z`),
+ângulos (`pitch`, `yaw`, `roll`) e escala. As posições são convertidas para o
+mesmo espaço do terreno e plotadas acima da altura correspondente, garantindo
+que a visualização reproduza o cenário esperado do jogo.
