@@ -2329,6 +2329,7 @@ class OpenGLTerrainApp:
         self._particle_vao: Optional["moderngl.VertexArray"] = None
         self._skybox_vao: Optional["moderngl.VertexArray"] = None
         self._sky_gradient_vao: Optional["moderngl.VertexArray"] = None
+        self._sky_vbo: Optional["moderngl.Buffer"] = None
         self.object_instances: List[BMDInstance] = []
         self.directional_light_dir = texture_library.light_direction()
         self.directional_light_color = np.array([1.0, 0.96, 0.88], dtype=np.float32)
@@ -2606,11 +2607,11 @@ class OpenGLTerrainApp:
             vertex_shader=textwrap.dedent(
                 """
                 #version 330
+                in vec2 in_position;
                 out vec2 v_pos;
-                const vec2 positions[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
                 void main() {
-                    v_pos = positions[gl_VertexID];
-                    gl_Position = vec4(v_pos, 0.999, 1.0);
+                    v_pos = in_position;
+                    gl_Position = vec4(in_position, 0.999, 1.0);
                 }
                 """
             ),
@@ -2634,12 +2635,11 @@ class OpenGLTerrainApp:
             vertex_shader=textwrap.dedent(
                 """
                 #version 330
+                in vec2 in_position;
                 out vec2 v_uv;
-                const vec2 positions[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
                 void main() {
-                    vec2 pos = positions[gl_VertexID];
-                    v_uv = pos * 0.5 + 0.5;
-                    gl_Position = vec4(pos, 0.999, 1.0);
+                    v_uv = in_position * 0.5 + 0.5;
+                    gl_Position = vec4(in_position, 0.999, 1.0);
                 }
                 """
             ),
@@ -2667,8 +2667,29 @@ class OpenGLTerrainApp:
                 self._sky_gradient_vao.release()
             except Exception:  # noqa: BLE001
                 pass
-        self._skybox_vao = self.ctx.vertex_array(self.skybox_program, [])
-        self._sky_gradient_vao = self.ctx.vertex_array(self.sky_program, [])
+        if self._sky_vbo is not None:
+            try:
+                self._sky_vbo.release()
+            except Exception:  # noqa: BLE001
+                pass
+        fullscreen_triangle = np.array(
+            [
+                -1.0,
+                -1.0,
+                3.0,
+                -1.0,
+                -1.0,
+                3.0,
+            ],
+            dtype="f4",
+        )
+        self._sky_vbo = self.ctx.buffer(fullscreen_triangle.tobytes())
+        self._skybox_vao = self.ctx.vertex_array(
+            self.skybox_program, [(self._sky_vbo, "2f", "in_position")]
+        )
+        self._sky_gradient_vao = self.ctx.vertex_array(
+            self.sky_program, [(self._sky_vbo, "2f", "in_position")]
+        )
 
         self.particle_program = self.ctx.program(
             vertex_shader=textwrap.dedent(
