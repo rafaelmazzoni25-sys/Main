@@ -2432,13 +2432,13 @@ def render_scene(
             terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
         )
 
-    ax.set_xlabel("X (tiles)")
-    ax.set_ylabel("Y (tiles)")
-    ax.set_zlabel("Altura")
-    ax.view_init(elev=60, azim=45)
-    if title:
-        ax.set_title(title)
-    plt.tight_layout()
+        ax.set_xlabel("X (tiles)")
+        ax.set_ylabel("Y (tiles)")
+        ax.set_zlabel("Altura")
+        ax.view_init(elev=60, azim=45)
+        if title:
+            ax.set_title(title)
+        plt.tight_layout()
 
     if output:
         fig.savefig(output)
