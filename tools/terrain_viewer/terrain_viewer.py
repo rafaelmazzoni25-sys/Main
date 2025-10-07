@@ -805,15 +805,20 @@ class TextureLibrary:
         *,
         detail_factor: int = 2,
         object_path: Optional[Path] = None,
+        map_id: Optional[int] = None,
     ) -> None:
         self.world_path = world_path
         self.detail_factor = max(1, detail_factor)
         self.object_path = object_path
+        self.map_id = map_id
         self._image_cache: Dict[int, Optional[np.ndarray]] = {}
         self._resized_cache: Dict[Tuple[int, int], np.ndarray] = {}
         self._missing: set[int] = set()
         self._fallback_cmap = cm.get_cmap("tab20")
         self.search_roots = self._build_search_roots()
+        self._light_image_loaded = False
+        self._light_image_uint8: Optional[np.ndarray] = None
+        self._light_map_cache: Dict[int, np.ndarray] = {}
 
     def _build_search_roots(self) -> List[Path]:
         roots: List[Path] = []
@@ -833,6 +838,64 @@ class TextureLibrary:
                     if lowered.startswith("object") or lowered.startswith("world"):
                         add(child)
         return roots
+
+    def _load_light_image(self) -> Optional[np.ndarray]:
+        if self._light_image_loaded:
+            return self._light_image_uint8
+        self._light_image_loaded = True
+        candidates = [
+            "TerrainLight",
+            "TerrainLight0",
+            "TerrainLight1",
+            "TerrainLight2",
+            "TerrainLight3",
+        ]
+        search = [self.world_path]
+        for name in candidates:
+            for path in _iter_candidate_paths(search, name, IMAGE_EXTENSIONS):
+                image = _load_image_file(path)
+                if image is None:
+                    continue
+                if image.ndim == 2:
+                    rgb = np.stack([image, image, image], axis=-1)
+                else:
+                    rgb = image[..., :3]
+                rgb_uint8 = np.asarray(rgb, dtype=np.uint8)
+                self._light_image_uint8 = rgb_uint8
+                base_size = rgb_uint8.shape[0]
+                self._light_map_cache[base_size] = rgb_uint8.astype(np.float32) / 255.0
+                return self._light_image_uint8
+        self._light_image_uint8 = None
+        return None
+
+    def light_map_texture(self, target_size: int) -> Optional[np.ndarray]:
+        if target_size <= 0:
+            return None
+        if target_size in self._light_map_cache:
+            return self._light_map_cache[target_size]
+        source = self._load_light_image()
+        if source is None:
+            return None
+        rgb = source[..., :3]
+        if rgb.shape[0] == target_size and rgb.shape[1] == target_size:
+            result = rgb.astype(np.float32) / 255.0
+        else:
+            image = Image.fromarray(rgb)
+            resized = image.resize((target_size, target_size), Image.BILINEAR)
+            result = np.asarray(resized, dtype=np.float32) / 255.0
+        if result.ndim == 2:
+            result = np.stack([result, result, result], axis=-1)
+        elif result.shape[2] == 4:
+            result = result[:, :, :3]
+        self._light_map_cache[target_size] = result.astype(np.float32)
+        return self._light_map_cache[target_size]
+
+    def light_direction(self) -> np.ndarray:
+        if self.map_id == 30:
+            direction = np.array([-0.5, 1.0, -1.0], dtype=np.float32)
+        else:
+            direction = np.array([-0.5, 0.5, -0.5], dtype=np.float32)
+        return _normalize(direction)
 
     def _fallback_color(self, index: int) -> np.ndarray:
         rgba = self._fallback_cmap((index % 20) / 20.0)
@@ -924,8 +987,18 @@ class TextureLibrary:
         y_coords = np.linspace(0.0, float(TERRAIN_SIZE - 1), refined_heights.shape[0], dtype=np.float32)
         xx, yy = np.meshgrid(x_coords, y_coords)
         facecolors = np.clip(texture_pixels[:-1, :-1, :], 0.0, 1.0)
-        shading = LightSource(azdeg=315, altdeg=55).shade(refined_heights, vert_exag=1.0, fraction=0.6)
-        facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
+        normals = _compute_normal_map(refined_heights, float(TERRAIN_SCALE) / float(self.detail_factor))
+        if normals.size == 0:
+            shading_rgb = np.ones((facecolors.shape[0], facecolors.shape[1], 3), dtype=np.float32)
+        else:
+            light_dir = self.light_direction()
+            luminosity = np.sum(normals * light_dir.reshape(1, 1, 3), axis=2)
+            luminosity = np.clip(luminosity + 0.5, 0.0, 1.0)
+            shading_rgb = np.repeat(luminosity[:, :, None], 3, axis=2)
+            light_map = self.light_map_texture(texture_pixels.shape[0])
+            if light_map is not None:
+                shading_rgb *= np.clip(light_map[:-1, :-1, :3], 0.0, 1.0)
+        facecolors[..., :3] *= shading_rgb
         facecolors = np.clip(facecolors, 0.0, 1.0)
         return xx, yy, refined_heights, facecolors
 
@@ -1694,6 +1767,7 @@ class _TerrainBuffers:
     ) -> None:
         detail = texture_library.detail_factor
         heights = _upsample_height_map(data.height, detail)
+        light_dir = texture_library.light_direction()
         tile_flags = compute_tile_material_flags(
             data.mapping_layer1,
             data.mapping_layer2,
@@ -1705,7 +1779,7 @@ class _TerrainBuffers:
         normal_map = _compute_normal_map(heights, spacing)
         shadow_mask = _compute_shadow_mask(
             heights,
-            np.array([-0.35, -1.0, -0.45], dtype=np.float32),
+            light_dir,
             spacing,
         )
         if detail > 1:
@@ -1797,6 +1871,25 @@ class _TerrainBuffers:
         self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.texture.repeat_x = True
         self.texture.repeat_y = True
+        refined_heights = _bilinear_resize(data.height, detail)
+        refined_normals = _compute_normal_map(refined_heights, float(TERRAIN_SCALE) / float(detail))
+        if refined_normals.size == 0:
+            lum_rgb = np.ones((height_px - 1, width_px - 1, 3), dtype=np.float32)
+        else:
+            luminosity = np.sum(refined_normals * light_dir.reshape(1, 1, 3), axis=2)
+            luminosity = np.clip(luminosity + 0.5, 0.0, 1.0)
+            lum_rgb = np.repeat(luminosity[:, :, None], 3, axis=2)
+        light_rgb = np.ones((height_px, width_px, 3), dtype=np.float32)
+        light_rgb[:-1, :-1, :] *= lum_rgb
+        sampled_light_map = texture_library.light_map_texture(height_px)
+        if sampled_light_map is not None:
+            light_rgb *= np.clip(sampled_light_map[:, :, :3], 0.0, 1.0)
+        light_bytes = (np.clip(light_rgb, 0.0, 1.0) * 255).astype(np.uint8).tobytes()
+        self.light_texture = ctx.texture((light_rgb.shape[1], light_rgb.shape[0]), 3, light_bytes)
+        self.light_texture.build_mipmaps()
+        self.light_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self.light_texture.repeat_x = True
+        self.light_texture.repeat_y = True
         normal_pixels = np.clip((normal_map * 0.5) + 0.5, 0.0, 1.0)
         normal_bytes = (normal_pixels * 255).astype(np.uint8).tobytes()
         self.normal_texture = ctx.texture(
@@ -1812,6 +1905,7 @@ class _TerrainBuffers:
         self.shadow_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.shadow_texture.repeat_x = True
         self.shadow_texture.repeat_y = True
+        self.light_direction = light_dir
 
 
 class _BMDMeshRenderer:
@@ -2202,7 +2296,7 @@ class OpenGLTerrainApp:
         self._particle_count = 0
         self._particle_vao: Optional["moderngl.VertexArray"] = None
         self.object_instances: List[BMDInstance] = []
-        self.directional_light_dir = np.array([-0.35, -1.0, -0.45], dtype=np.float32)
+        self.directional_light_dir = texture_library.light_direction()
         self.directional_light_color = np.array([1.0, 0.96, 0.88], dtype=np.float32)
         self.shadow_strength = 0.65
         self.static_point_lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
@@ -2248,6 +2342,7 @@ class OpenGLTerrainApp:
                 uniform sampler2D u_texture;
                 uniform sampler2D u_normal_map;
                 uniform sampler2D u_shadow_map;
+                uniform sampler2D u_light_map;
                 uniform vec3 u_dir_light_dir;
                 uniform vec3 u_dir_light_color;
                 uniform int u_point_light_count;
@@ -2288,7 +2383,8 @@ class OpenGLTerrainApp:
                     if ((v_material & FLAG_ALPHA_TEST) != 0 && alpha < 0.35) {
                         discard;
                     }
-                    vec3 base_color = tex.rgb;
+                    vec3 static_light = texture(u_light_map, v_uv).rgb;
+                    vec3 base_color = tex.rgb * static_light;
                     vec3 map_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
                     vec3 normal = normalize(v_normal);
                     if (wave != 0.0) {
@@ -2814,6 +2910,8 @@ class OpenGLTerrainApp:
             self.overlay,
             self.material_library,
         )
+        if self.terrain is not None:
+            self.directional_light_dir = self.terrain.light_direction
         self._initialize_sky_texture()
         self.object_instances = self._load_objects()
         self._build_static_lights()
@@ -2951,6 +3049,10 @@ class OpenGLTerrainApp:
             terrain.normal_texture.use(location=1)
         if terrain.shadow_texture is not None:
             terrain.shadow_texture.use(location=2)
+        if terrain.light_texture is not None:
+            terrain.light_texture.use(location=3)
+        elif self._default_white_texture is not None:
+            self._default_white_texture.use(location=3)
         model_identity = np.eye(4, dtype=np.float32)
         self.ctx.disable(moderngl.BLEND)
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -2962,6 +3064,7 @@ class OpenGLTerrainApp:
             self.terrain_program["u_normal_map"].value = 1
         if terrain.shadow_texture is not None:
             self.terrain_program["u_shadow_map"].value = 2
+        self.terrain_program["u_light_map"].value = 3
         self.terrain_program["u_dir_light_dir"].value = tuple(dir_light.tolist())
         self.terrain_program["u_dir_light_color"].value = tuple(self.directional_light_color.tolist())
         self.terrain_program["u_point_light_count"].value = point_count
@@ -4300,6 +4403,7 @@ def run_viewer(
                 display_result.world_path,
                 detail_factor=max(1, texture_detail),
                 object_path=object_path,
+                map_id=display_result.map_id,
             )
             material_roots: List[Path] = []
             if object_path:
@@ -4313,6 +4417,7 @@ def run_viewer(
                 display_result.world_path,
                 detail_factor=max(1, texture_detail),
                 object_path=object_path,
+                map_id=display_result.map_id,
             )
 
         bmd_library: Optional[BMDLibrary] = None
@@ -4786,6 +4891,7 @@ class TerrainViewerGUI:
                         world_path,
                         detail_factor=max(1, texture_detail),
                         object_path=object_dir,
+                        map_id=self.last_result.map_id,
                     )
                 material_library = None
                 bmd_library = None
