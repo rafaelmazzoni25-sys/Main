@@ -1,5 +1,9 @@
 # Terrain viewer
 
+> **Nota:** o projeto ativo escrito em C++ está disponível em
+> `tools/Terrain_Editor`. Este README permanece como referência histórica da
+> versão em Python.
+
 Este utilitário em Python recria parte do pipeline de carregamento do terreno
 (altura, atributos, mapeamento de texturas e objetos estáticos) e oferece uma
 visualização interativa com dois motores: o novo renderer OpenGL (via

@@ -3039,6 +3039,9 @@ class OpenGLTerrainApp:
     def _render_sky(self, time_value: float) -> None:
         assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
+        previous_depth_mask = self.ctx.depth_mask
+        if previous_depth_mask:
+            self.ctx.depth_mask = False
         self.ctx.screen.use()
         if (
             self.sky_texture is not None
@@ -3057,6 +3060,8 @@ class OpenGLTerrainApp:
             self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
             self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
             self._sky_gradient_vao.render(mode=moderngl.TRIANGLES, vertices=3)
+        if previous_depth_mask:
+            self.ctx.depth_mask = True
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
