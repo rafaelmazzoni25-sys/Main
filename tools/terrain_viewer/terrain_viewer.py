@@ -1936,27 +1936,37 @@ class _BMDMeshRenderer:
         self.base_positions = mesh.positions.astype(np.float32, copy=True)
         self.base_normals = mesh.normals.astype(np.float32, copy=True)
         self.base_texcoords = mesh.texcoords.astype(np.float32, copy=True)
-        vertices = np.hstack([self.base_positions, self.base_normals, self.base_texcoords])
-        self.vbo = ctx.buffer(vertices.astype("f4").tobytes())
-        self.ibo = ctx.buffer(mesh.indices.astype(np.uint32).tobytes())
-        self.vao_diffuse = ctx.vertex_array(
-            diffuse_program,
-            [
-                (self.vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
-            ],
-            self.ibo,
-        )
-        self.vao_specular = (
-            ctx.vertex_array(
-                specular_program,
+        self.vbo: Optional["moderngl.Buffer"]
+        self.ibo: Optional["moderngl.Buffer"]
+        self.vao_diffuse: Optional["moderngl.VertexArray"]
+        self.vao_specular: Optional["moderngl.VertexArray"]
+        if self.base_positions.size == 0 or mesh.indices.size == 0:
+            self.vbo = None
+            self.ibo = None
+            self.vao_diffuse = None
+            self.vao_specular = None
+        else:
+            vertices = np.hstack([self.base_positions, self.base_normals, self.base_texcoords])
+            self.vbo = ctx.buffer(vertices.astype("f4").tobytes())
+            self.ibo = ctx.buffer(mesh.indices.astype(np.uint32).tobytes())
+            self.vao_diffuse = ctx.vertex_array(
+                diffuse_program,
                 [
                     (self.vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
                 ],
                 self.ibo,
             )
-            if specular_program is not None
-            else None
-        )
+            self.vao_specular = (
+                ctx.vertex_array(
+                    specular_program,
+                    [
+                        (self.vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
+                    ],
+                    self.ibo,
+                )
+                if specular_program is not None
+                else None
+            )
         self.material_flags = mesh.material_flags
         self.material_state = mesh.material_state
         self.texture = None
@@ -1964,7 +1974,9 @@ class _BMDMeshRenderer:
         self.bone_indices = (
             mesh.bone_indices.astype(np.int32, copy=True) if mesh.bone_indices is not None else None
         )
-        self.has_skinning = bool(self.bone_indices is not None and np.any(self.bone_indices >= 0))
+        self.has_skinning = bool(
+            self.bone_indices is not None and np.any(self.bone_indices >= 0) and self.vbo is not None
+        )
         self._skinned_positions = self.base_positions.copy()
         self._skinned_normals = self.base_normals.copy()
         if texture_loader is not None and mesh.texture_name:
@@ -1998,7 +2010,7 @@ class _BMDMeshRenderer:
                 self.normal_texture.repeat_y = True
 
     def update_pose(self, bone_matrices: Sequence[np.ndarray]) -> None:
-        if not self.has_skinning or not bone_matrices:
+        if not self.has_skinning or not bone_matrices or self.vbo is None:
             return
         identity = np.eye(4, dtype=np.float32)
         for idx, bone_idx in enumerate(self.bone_indices):
@@ -2020,6 +2032,10 @@ class _BMDMeshRenderer:
             ]
         )
         self.vbo.write(vertex_data.astype("f4").tobytes())
+
+    @property
+    def is_empty(self) -> bool:
+        return self.vbo is None or self.ibo is None or self.vao_diffuse is None
 
     def apply_state(self, ctx: "moderngl.Context") -> None:
         if moderngl is None:
@@ -2311,6 +2327,8 @@ class OpenGLTerrainApp:
         self._particle_vbo: Optional["moderngl.Buffer"] = None
         self._particle_count = 0
         self._particle_vao: Optional["moderngl.VertexArray"] = None
+        self._skybox_vao: Optional["moderngl.VertexArray"] = None
+        self._sky_gradient_vao: Optional["moderngl.VertexArray"] = None
         self.object_instances: List[BMDInstance] = []
         self.directional_light_dir = texture_library.light_direction()
         self.directional_light_color = np.array([1.0, 0.96, 0.88], dtype=np.float32)
@@ -2639,6 +2657,19 @@ class OpenGLTerrainApp:
             ),
         )
 
+        if self._skybox_vao is not None:
+            try:
+                self._skybox_vao.release()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._sky_gradient_vao is not None:
+            try:
+                self._sky_gradient_vao.release()
+            except Exception:  # noqa: BLE001
+                pass
+        self._skybox_vao = self.ctx.vertex_array(self.skybox_program, [])
+        self._sky_gradient_vao = self.ctx.vertex_array(self.sky_program, [])
+
         self.particle_program = self.ctx.program(
             vertex_shader=textwrap.dedent(
                 """
@@ -2864,9 +2895,13 @@ class OpenGLTerrainApp:
                         mesh,
                         self.bmd_library.load_texture_image if self.bmd_library else None,
                     )
+                    if renderer.is_empty:
+                        continue
                     renderers.append(renderer)
                 self._object_mesh_cache[cache_key] = renderers
-            render_meshes = self._object_mesh_cache[cache_key]
+            render_meshes = [renderer for renderer in self._object_mesh_cache[cache_key] if not renderer.is_empty]
+            if not render_meshes:
+                continue
             animation_player = BMDAnimationPlayer(model) if model.animations else None
             if animation_player:
                 bone_matrices = animation_player.pose_matrices()
@@ -2984,11 +3019,15 @@ class OpenGLTerrainApp:
         assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.screen.use()
-        if self.sky_texture is not None and self.skybox_program is not None:
+        if (
+            self.sky_texture is not None
+            and self.skybox_program is not None
+            and self._skybox_vao is not None
+        ):
             self.sky_texture.use(location=3)
             self.skybox_program["u_sky"].value = 3
-            self.skybox_program.run(vertices=3)
-        if self.sky_program is not None:
+            self._skybox_vao.render(mode=moderngl.TRIANGLES, vertices=3)
+        if self.sky_program is not None and self._sky_gradient_vao is not None:
             cycle = (math.sin(time_value * 0.05) + 1.0) * 0.5
             day_top = np.array([0.32, 0.45, 0.72], dtype=np.float32)
             night_top = np.array([0.05, 0.08, 0.18], dtype=np.float32)
@@ -2996,7 +3035,7 @@ class OpenGLTerrainApp:
             bottom = self.fog_color * (0.7 + 0.3 * cycle)
             self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
             self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
-            self.sky_program.run(vertices=3)
+            self._sky_gradient_vao.render(mode=moderngl.TRIANGLES, vertices=3)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
@@ -3093,7 +3132,8 @@ class OpenGLTerrainApp:
         self.terrain_program["u_camera_pos"].value = tuple(eye.tolist())
         self.terrain_program["u_shadow_strength"].value = self.shadow_strength
         self.terrain_program["u_emissive_override"].value = tuple(self.emissive_override.tolist())
-        terrain.vao_diffuse.render()
+        if terrain.vao_diffuse is not None:
+            terrain.vao_diffuse.render()
 
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
@@ -3130,6 +3170,8 @@ class OpenGLTerrainApp:
                 self.object_program["u_specular_power"].value = float(mesh.material_state.specular_power)
                 alpha_ref = float(mesh.material_state.alpha_ref if mesh.material_state.alpha_test else 0.0)
                 self.object_program["u_alpha_ref"].value = alpha_ref
+                if mesh.vao_diffuse is None:
+                    continue
                 mesh.vao_diffuse.render()
         self.ctx.disable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
