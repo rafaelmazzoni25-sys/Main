@@ -2,7 +2,10 @@
 
 Este utilitário em Python recria parte do pipeline de carregamento do terreno
 (altura, atributos, mapeamento de texturas e objetos estáticos) e gera uma
-visualização rápida usando o Matplotlib.
+visualização interativa usando o Matplotlib. A partir desta versão o modo 3D
+renderiza os azulejos reais do cliente (com iluminação dinâmica), permitindo
+percorrer o mapa com os mesmos visuais vistos in-game sempre que as texturas
+`Tile*.jpg/.ozj/.ozt` estiverem presentes na pasta `WorldX`/`ObjectX`.
 
 ## Pré-requisitos
 
@@ -64,6 +67,9 @@ do zero e usa apenas ações comuns no Windows:
    - Troque o **Overlay** para colorir o terreno pelas texturas, altura ou
      atributos. Os campos **Mostrar apenas** e **Ocultar** filtram os objetos
      renderizados por ID ou texto livre.
+   - Ajuste **Detalhe textura** para definir quantas subdivisões cada tile
+     recebe quando o overlay está em **Texturas** (valores maiores exibem mais
+     definição, porém exigem mais tempo de renderização).
    - Marque **Permitir mover objetos** para habilitar a edição direta na janela
      do Matplotlib. Selecione um ponto com o mouse e use as setas para mover a
      instância (Shift acelera o passo, `[` e `]` ajustam a distância percorrida).
@@ -92,8 +98,10 @@ continuam abaixo.
 1. Extraia os arquivos do cliente em uma pasta acessível. Você precisará do
    diretório `Data/WorldX` correspondente ao mapa que deseja visualizar com os
    arquivos `EncTerrain*.att`, `EncTerrain*.map` e `TerrainHeight.OZB` (ou
-   `TerrainHeightNew.OZB`). Se os objetos estiverem separados em `Data/ObjectX`,
-   mantenha essa pasta acessível também.
+   `TerrainHeightNew.OZB`). Para que o terreno apareça texturizado como no
+   jogo, mantenha também os arquivos `Tile*.jpg/.ozj/.ozt` fornecidos pelo
+   cliente. Se os objetos estiverem separados em `Data/ObjectX`, mantenha essa
+   pasta acessível também.
 
 ### Interface gráfica
 
@@ -164,6 +172,9 @@ em nomes legíveis.
   (heatmap) com sobreposição plana.
 - `--overlay`: define o mapa de cores do terreno (texturas, altura ou
   atributos).
+- `--texture-detail`: controla a densidade da malha quando o overlay está em
+  texturas. Valores altos (4, 8...) deixam os azulejos mais nítidos às custas de
+  maior tempo de renderização.
 - `--filter` / `--exclude`: incluem ou ocultam objetos cujo ID ou nome contenha
   o texto informado (argumento pode ser repetido).
 - `--save-objects`: grava um novo arquivo `EncTerrainXX.obj` criptografado com

@@ -10,6 +10,7 @@ import argparse
 import ast
 import csv
 import functools
+import io
 import json
 import math
 import re
@@ -17,15 +18,18 @@ import struct
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import tkinter as tk
+from matplotlib import cm
 from matplotlib.axes import Axes
 from matplotlib.backend_bases import KeyEvent, PickEvent
+from matplotlib.colors import LightSource
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Path3DCollection
+from PIL import Image
 from tkinter import filedialog, messagebox
 
 TERRAIN_SIZE = 256
@@ -56,6 +60,36 @@ DEFAULT_ENUM_PATH = REPO_ROOT / "source" / "_enum.h"
 
 MODEL_LINE_RE = re.compile(r"^(MODEL_[A-Z0-9_]+)\s*(?:=\s*([^,]+))?\s*,?$")
 CONST_LINE_RE = re.compile(r"^([A-Z0-9_]+)\s*=\s*([^,]+)\s*,?$")
+
+TILE_TEXTURE_CANDIDATES: Dict[int, List[str]] = {
+    0: ["TileGrass01", "TileGrass01_R"],
+    1: ["TileGrass02"],
+    2: ["TileGround01", "AlphaTileGround01", "AlphaTile01"],
+    3: ["TileGround02", "AlphaTileGround02"],
+    4: ["TileGround03", "AlphaTileGround03"],
+    5: ["TileWater01", "Object25/water1", "Object25/water2"],
+    6: ["TileWood01"],
+    7: ["TileRock01"],
+    8: ["TileRock02"],
+    9: ["TileRock03"],
+    10: ["TileRock04", "AlphaTile01"],
+    11: ["TileRock05", "Object64/song_lava1"],
+    12: ["TileRock06", "AlphaTile01"],
+    13: ["TileRock07"],
+}
+
+for ext_index in range(1, 17):
+    TILE_TEXTURE_CANDIDATES[13 + ext_index] = [f"ExtTile{ext_index:02d}"]
+
+IMAGE_EXTENSIONS: Tuple[str, ...] = (
+    ".ozj",
+    ".ozt",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".tga",
+    ".bmp",
+)
 
 
 def _eval_int_expression(expr: str, env: Mapping[str, int]) -> int:
@@ -194,6 +228,244 @@ class TerrainLoadResult:
     objects_path: Path
     objects_version: int
     all_objects: List[TerrainObject]
+
+
+def _bilinear_resize(matrix: np.ndarray, factor: int) -> np.ndarray:
+    if factor <= 1:
+        return matrix.astype(np.float32, copy=False)
+    height, width = matrix.shape
+    new_height = height * factor
+    new_width = width * factor
+    src_y = np.arange(height, dtype=np.float32)
+    src_x = np.arange(width, dtype=np.float32)
+    dst_y = np.linspace(0.0, float(height - 1), new_height, dtype=np.float32)
+    dst_x = np.linspace(0.0, float(width - 1), new_width, dtype=np.float32)
+
+    matrix_f = matrix.astype(np.float32)
+    temp = np.empty((height, new_width), dtype=np.float32)
+    for y_idx in range(height):
+        temp[y_idx] = np.interp(dst_x, src_x, matrix_f[y_idx])
+
+    result = np.empty((new_height, new_width), dtype=np.float32)
+    for x_idx in range(new_width):
+        result[:, x_idx] = np.interp(dst_y, src_y, temp[:, x_idx])
+    return result
+
+
+def _ensure_rgba(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 2:
+        image = np.stack([image, image, image], axis=-1)
+    if image.shape[2] == 4:
+        return image
+    alpha = np.full((*image.shape[:2], 1), 255, dtype=image.dtype)
+    return np.concatenate([image, alpha], axis=2)
+
+
+def _load_ozj(path: Path) -> Optional[np.ndarray]:
+    data = path.read_bytes()
+    if len(data) <= 24:
+        return None
+    payload = data[24:]
+    try:
+        with Image.open(io.BytesIO(payload)) as img:
+            return _ensure_rgba(np.array(img.convert("RGBA")))
+    except Exception:
+        return None
+
+
+def _load_ozt(path: Path) -> Optional[np.ndarray]:
+    raw = path.read_bytes()
+    if len(raw) <= 20:
+        return None
+    idx = 12
+    idx += 4
+    if idx + 5 > len(raw):
+        return None
+    nx = struct.unpack_from("<H", raw, idx)[0]
+    idx += 2
+    ny = struct.unpack_from("<H", raw, idx)[0]
+    idx += 2
+    bit_depth = raw[idx]
+    idx += 1
+    idx += 1  # image descriptor
+    if bit_depth != 32:
+        return None
+    expected = nx * ny * 4
+    if idx + expected > len(raw):
+        return None
+    buffer = np.frombuffer(raw, dtype=np.uint8, count=expected, offset=idx)
+    buffer = buffer.reshape((ny, nx, 4))
+    rgba = np.empty_like(buffer)
+    rgba[..., 0] = buffer[..., 2]
+    rgba[..., 1] = buffer[..., 1]
+    rgba[..., 2] = buffer[..., 0]
+    rgba[..., 3] = buffer[..., 3]
+    rgba = np.flipud(rgba)
+    return rgba
+
+
+def _load_image_file(path: Path) -> Optional[np.ndarray]:
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".ozj":
+            return _load_ozj(path)
+        if suffix == ".ozt":
+            return _load_ozt(path)
+        with Image.open(path) as img:
+            return _ensure_rgba(np.array(img.convert("RGBA")))
+    except Exception:
+        return None
+
+
+def _iter_candidate_paths(
+    search_roots: Sequence[Path],
+    base_name: str,
+    extensions: Sequence[str],
+) -> Iterable[Path]:
+    normalized = base_name.replace("\\", "/")
+    variants = {base_name, normalized, normalized.lower(), normalized.upper()}
+    for root in search_roots:
+        for name in variants:
+            path = root / name
+            if path.is_file():
+                yield path
+            for ext in extensions:
+                target = root / f"{name}{ext}"
+                if target.is_file():
+                    yield target
+                target_with_dot = root / f"{name}.{ext.lstrip('.') }"
+                if target_with_dot.is_file():
+                    yield target_with_dot
+
+
+class TextureLibrary:
+    def __init__(
+        self,
+        world_path: Path,
+        *,
+        detail_factor: int = 2,
+        object_path: Optional[Path] = None,
+    ) -> None:
+        self.world_path = world_path
+        self.detail_factor = max(1, detail_factor)
+        self.object_path = object_path
+        self._image_cache: Dict[int, Optional[np.ndarray]] = {}
+        self._resized_cache: Dict[Tuple[int, int], np.ndarray] = {}
+        self._missing: set[int] = set()
+        self._fallback_cmap = cm.get_cmap("tab20")
+        self.search_roots = self._build_search_roots()
+
+    def _build_search_roots(self) -> List[Path]:
+        roots: List[Path] = []
+
+        def add(path: Optional[Path]) -> None:
+            if path and path.exists() and path.is_dir() and path not in roots:
+                roots.append(path)
+
+        add(self.world_path)
+        add(self.world_path.parent)
+        add(self.object_path)
+        parent = self.world_path.parent
+        if parent.exists():
+            for child in sorted(parent.iterdir()):
+                if child.is_dir():
+                    lowered = child.name.lower()
+                    if lowered.startswith("object") or lowered.startswith("world"):
+                        add(child)
+        return roots
+
+    def _fallback_color(self, index: int) -> np.ndarray:
+        rgba = self._fallback_cmap((index % 20) / 20.0)
+        return np.array(rgba, dtype=np.float32)
+
+    def _load_texture(self, index: int) -> Optional[np.ndarray]:
+        if index in self._image_cache:
+            return self._image_cache[index]
+        candidates = TILE_TEXTURE_CANDIDATES.get(index, [])
+        if not candidates:
+            candidates = [f"ExtTile{index:02d}"]
+        image: Optional[np.ndarray] = None
+        for base_name in candidates:
+            for path in _iter_candidate_paths(self.search_roots, base_name, IMAGE_EXTENSIONS):
+                image = _load_image_file(path)
+                if image is not None:
+                    break
+            if image is not None:
+                break
+        self._image_cache[index] = image
+        if image is None:
+            self._missing.add(index)
+        return image
+
+    def _tile_patch(self, index: int, size: int) -> np.ndarray:
+        cache_key = (index, size)
+        if cache_key in self._resized_cache:
+            return self._resized_cache[cache_key]
+        image = self._load_texture(index)
+        if image is None:
+            color = self._fallback_color(index)
+            tile = np.ones((size, size, 4), dtype=np.float32)
+            tile[..., 0:3] = color[:3]
+            tile[..., 3] = color[3]
+        else:
+            pil_image = Image.fromarray(image)
+            if pil_image.mode != "RGBA":
+                pil_image = pil_image.convert("RGBA")
+            resized = pil_image.resize((size, size), Image.BILINEAR)
+            tile = np.asarray(resized, dtype=np.float32) / 255.0
+            if tile.ndim == 2:
+                tile = np.stack([tile, tile, tile, np.ones_like(tile)], axis=-1)
+            elif tile.shape[2] == 3:
+                alpha = np.ones((size, size, 1), dtype=np.float32)
+                tile = np.concatenate([tile, alpha], axis=2)
+        self._resized_cache[cache_key] = tile.astype(np.float32)
+        return self._resized_cache[cache_key]
+
+    def compose_texture_pixels(
+        self,
+        layer1: np.ndarray,
+        layer2: np.ndarray,
+        alpha: np.ndarray,
+    ) -> np.ndarray:
+        factor = self.detail_factor
+        height, width = layer1.shape
+        pixels = np.zeros((height * factor, width * factor, 4), dtype=np.float32)
+        for y in range(height):
+            for x in range(width):
+                idx1 = int(layer1[y, x])
+                idx2 = int(layer2[y, x])
+                alpha_val = float(alpha[y, x])
+                base_patch = self._tile_patch(idx1, factor)
+                tile_patch = base_patch
+                if idx2 != 255 and alpha_val > 0.0:
+                    overlay_patch = self._tile_patch(idx2, factor)
+                    tile_patch = (1.0 - alpha_val) * base_patch + alpha_val * overlay_patch
+                y0 = y * factor
+                y1 = y0 + factor
+                x0 = x * factor
+                x1 = x0 + factor
+                pixels[y0:y1, x0:x1, :] = tile_patch
+        return pixels
+
+    def build_surface(self, data: TerrainData) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        factor = self.detail_factor
+        heights = data.height.astype(np.float32)
+        refined_heights = _bilinear_resize(heights, factor)
+        texture_pixels = self.compose_texture_pixels(
+            data.mapping_layer1, data.mapping_layer2, data.mapping_alpha
+        )
+        x_coords = np.linspace(0.0, float(TERRAIN_SIZE - 1), refined_heights.shape[1], dtype=np.float32)
+        y_coords = np.linspace(0.0, float(TERRAIN_SIZE - 1), refined_heights.shape[0], dtype=np.float32)
+        xx, yy = np.meshgrid(x_coords, y_coords)
+        facecolors = np.clip(texture_pixels[:-1, :-1, :], 0.0, 1.0)
+        shading = LightSource(azdeg=315, altdeg=55).shade(refined_heights, vert_exag=1.0, fraction=0.6)
+        facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
+        facecolors = np.clip(facecolors, 0.0, 1.0)
+        return xx, yy, refined_heights, facecolors
+
+    @property
+    def missing_indices(self) -> Sequence[int]:
+        return sorted(self._missing)
 
 
 def map_file_decrypt(data: bytes) -> bytes:
@@ -434,6 +706,7 @@ def render_scene(
     enable_object_edit: bool = False,
     view_mode: str = "3d",
     overlay: str = "textures",
+    texture_library: Optional[TextureLibrary] = None,
 ) -> None:
     heights = data.height
     matrix, cmap_name = _overlay_matrix(data, overlay)
@@ -455,22 +728,33 @@ def render_scene(
         ax.set_aspect("equal", adjustable="box")
         fig.tight_layout()
     else:
-        x = np.arange(TERRAIN_SIZE)
-        y = np.arange(TERRAIN_SIZE)
-        xx, yy = np.meshgrid(x, y)
         fig = plt.figure(figsize=(10, 7))
         ax = fig.add_subplot(111, projection="3d")
 
-        cmap = plt.get_cmap(cmap_name)
-        face_colors = cmap(_normalize_for_colormap(matrix))
+        if overlay == "textures" and texture_library is not None:
+            xx, yy, render_heights, facecolors = texture_library.build_surface(data)
+        else:
+            x = np.arange(TERRAIN_SIZE, dtype=np.float32)
+            y = np.arange(TERRAIN_SIZE, dtype=np.float32)
+            xx, yy = np.meshgrid(x, y)
+            render_heights = heights.astype(np.float32)
+            cmap = plt.get_cmap(cmap_name)
+            normalized = _normalize_for_colormap(matrix)
+            base_colors = cmap(normalized)
+            facecolors = base_colors[:-1, :-1, :]
+            shading = LightSource(azdeg=315, altdeg=55).shade(
+                render_heights, vert_exag=1.0, fraction=0.6
+            )
+            facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
+            facecolors = np.clip(facecolors, 0.0, 1.0)
 
         ax.plot_surface(
             xx,
             yy,
-            heights,
-            rstride=2,
-            cstride=2,
-            facecolors=face_colors,
+            render_heights,
+            rstride=1,
+            cstride=1,
+            facecolors=facecolors,
             linewidth=0,
             antialiased=False,
             shade=False,
@@ -1260,6 +1544,7 @@ def run_viewer(
     exclude_filters: Optional[Sequence[str]] = None,
     export_json: Optional[Path] = None,
     save_objects: Optional[Path] = None,
+    texture_detail: int = 2,
 ) -> TerrainLoadResult:
     result = load_world_data(
         world_path,
@@ -1290,6 +1575,13 @@ def run_viewer(
         raise ValueError("A movimentação de objetos só está disponível no modo 3D.")
 
     if render:
+        texture_library: Optional[TextureLibrary] = None
+        if view_mode == "3d" and overlay == "textures":
+            texture_library = TextureLibrary(
+                display_result.world_path,
+                detail_factor=max(1, texture_detail),
+                object_path=object_path,
+            )
         render_scene(
             display_result.data,
             display_result.objects,
@@ -1299,7 +1591,16 @@ def run_viewer(
             enable_object_edit=enable_object_edit,
             view_mode=view_mode,
             overlay=overlay,
+            texture_library=texture_library,
         )
+        if texture_library is not None and texture_library.missing_indices:
+            preview = ", ".join(map(str, texture_library.missing_indices[:10]))
+            if len(texture_library.missing_indices) > 10:
+                preview += ", ..."
+            print(
+                "Aviso: não foi possível localizar todas as texturas. Índices ausentes:",
+                preview,
+            )
 
     if truncated:
         print(
@@ -1374,6 +1675,7 @@ class TerrainViewerGUI:
         self.overlay_var = tk.StringVar(value="Texturas")
         self.include_filter_var = tk.StringVar()
         self.exclude_filter_var = tk.StringVar()
+        self.texture_detail_var = tk.StringVar(value="2")
 
         self.object_dir_var = tk.StringVar()
         self.status_var = tk.StringVar()
@@ -1431,6 +1733,7 @@ class TerrainViewerGUI:
         overlay: str,
         include: Optional[str],
         exclude: Optional[str],
+        texture_detail: int,
     ) -> Tuple[str, ...]:
         return (
             str(world_path.resolve()),
@@ -1443,6 +1746,7 @@ class TerrainViewerGUI:
             overlay,
             include or "",
             exclude or "",
+            str(texture_detail),
         )
 
     def _can_reuse_last(self, params: Tuple[str, ...]) -> bool:
@@ -1460,6 +1764,7 @@ class TerrainViewerGUI:
         str,
         Optional[str],
         Optional[str],
+        int,
         Tuple[str, ...],
     ]:
         world_path = self._current_world_path()
@@ -1472,6 +1777,9 @@ class TerrainViewerGUI:
         view_mode = self._current_view_mode()
         overlay = self._current_overlay()
         include, exclude = self._current_filter_values()
+        texture_detail = _safe_int(self.texture_detail_var.get()) or 2
+        if texture_detail < 1:
+            texture_detail = 1
         params = self._compose_params(
             world_path,
             map_id,
@@ -1482,6 +1790,7 @@ class TerrainViewerGUI:
             overlay,
             include,
             exclude,
+            texture_detail,
         )
         return (
             world_path,
@@ -1493,6 +1802,7 @@ class TerrainViewerGUI:
             overlay,
             include,
             exclude,
+            texture_detail,
             params,
         )
 
@@ -1551,6 +1861,11 @@ class TerrainViewerGUI:
             self.overlay_var,
             *self.overlay_map.keys(),
         ).grid(row=2, column=3, sticky="ew")
+
+        tk.Label(options_frame, text="Detalhe textura:").grid(row=2, column=4, sticky="w")
+        tk.Entry(options_frame, textvariable=self.texture_detail_var, width=5).grid(
+            row=2, column=5, sticky="w"
+        )
 
         tk.Label(options_frame, text="Mostrar apenas (ID/nome):").grid(row=3, column=0, sticky="w")
         tk.Entry(options_frame, textvariable=self.include_filter_var, width=20).grid(row=3, column=1, sticky="ew")
@@ -1646,11 +1961,12 @@ class TerrainViewerGUI:
                 _,
                 _,
                 _,
-                _,
+                object_dir,
                 view_mode,
                 overlay,
                 _,
                 _,
+                texture_detail,
                 params,
             ) = self._gather_context()
         except Exception as exc:  # noqa: BLE001
@@ -1670,6 +1986,13 @@ class TerrainViewerGUI:
                     f"{world_path.name} (mapa {self.last_result.map_id}) —"
                     f" {len(self.last_result.objects)} objetos"
                 )
+                texture_library = None
+                if overlay == "textures":
+                    texture_library = TextureLibrary(
+                        world_path,
+                        detail_factor=max(1, texture_detail),
+                        object_path=object_dir,
+                    )
                 render_scene(
                     self.last_result.data,
                     self.last_result.objects,
@@ -1679,6 +2002,7 @@ class TerrainViewerGUI:
                     enable_object_edit=False,
                     view_mode=view_mode,
                     overlay=overlay,
+                    texture_library=texture_library,
                 )
             else:
                 self._run(show=False, output=destination)
@@ -1688,7 +2012,7 @@ class TerrainViewerGUI:
 
     def export_objects(self) -> None:
         try:
-            (_, _, _, _, _, _, _, _, _, params) = self._gather_context()
+            (_, _, _, _, _, _, _, _, _, _, params) = self._gather_context()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
             return
@@ -1711,7 +2035,7 @@ class TerrainViewerGUI:
 
     def export_json(self) -> None:
         try:
-            (_, _, _, _, _, _, _, _, _, params) = self._gather_context()
+            (_, _, _, _, _, _, _, _, _, _, params) = self._gather_context()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
             return
@@ -1734,7 +2058,7 @@ class TerrainViewerGUI:
 
     def save_objects_dialog(self) -> None:
         try:
-            (_, _, _, _, _, _, _, _, _, params) = self._gather_context()
+            (_, _, _, _, _, _, _, _, _, _, params) = self._gather_context()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
             return
@@ -1790,6 +2114,7 @@ class TerrainViewerGUI:
             overlay,
             include,
             exclude,
+            texture_detail,
             params,
         ) = self._gather_context()
         include_filters = [include] if include else None
@@ -1816,6 +2141,7 @@ class TerrainViewerGUI:
             exclude_filters=exclude_filters,
             export_json=export_json,
             save_objects=save_objects_path,
+            texture_detail=texture_detail,
         )
         self.map_id_var.set(str(result.map_id))
         self.status_var.set(format_summary_line(result))
@@ -1916,6 +2242,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Coloração aplicada ao terreno (texturas, altura ou atributos).",
     )
     parser.add_argument(
+        "--texture-detail",
+        type=int,
+        default=2,
+        help="Subdivisões por tile ao rasterizar texturas reais (>=1).",
+    )
+    parser.add_argument(
         "--filter",
         dest="include_filters",
         action="append",
@@ -1955,6 +2287,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         exclude_filters=args.exclude_filters,
         export_json=args.export_json,
         save_objects=args.save_objects,
+        texture_detail=max(1, args.texture_detail),
     )
 
 
