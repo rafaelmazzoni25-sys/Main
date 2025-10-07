@@ -69,6 +69,9 @@ do zero e usa apenas ações comuns no Windows:
      instância (Shift acelera o passo, `[` e `]` ajustam a distância percorrida).
      Após fechar a janela, use **Salvar EncTerrain** para gerar um novo
      `EncTerrainXX.obj` com as posições atualizadas.
+   - Use **WASD** para transladar a câmera pela cena 3D, **Q/E** para aproximar
+     ou afastar, **I/K** para inclinar a vista e **J/L** para orbitar; o scroll
+     do mouse também ajusta o zoom rapidamente.
    - Para gerar relatórios rápidos, utilize os botões **Resumo** (exibe
      estatísticas detalhadas), **Exportar objetos** (salva um CSV com a lista
      filtrada), **Exportar JSON** (gera um arquivo estruturado para scripts) ou
@@ -113,6 +116,10 @@ precise analisar os dados, use **Resumo** para visualizar estatísticas
 (altura/atributos/texturas), **Exportar objetos** ou **Exportar JSON** para
 obter a lista filtrada em CSV/JSON, e **Salvar EncTerrain** para persistir as
 edições feitas no editor interativo.
+
+Quando a visualização 3D estiver aberta, utilize **WASD/QE/IJKL** para navegar
+livremente pela cena. As setas do teclado continuam dedicadas ao movimento dos
+objetos selecionados, enquanto o scroll do mouse oferece um zoom incremental.
 
 ### Linha de comando
 

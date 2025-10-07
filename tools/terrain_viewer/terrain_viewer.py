@@ -482,8 +482,12 @@ def render_scene(
             oy = np.array([obj.tile_position[1] for obj in objects])
             oz = np.array([bilinear_height(heights, x, y) for x, y in zip(ox, oy)])
             type_ids = np.array([obj.type_id for obj in objects], dtype=float)
-            if type_ids.size > 0 and type_ids.ptp() > 0:
-                colors = (type_ids - type_ids.min()) / type_ids.ptp()
+            if type_ids.size > 0:
+                ptp_val = np.ptp(type_ids)
+                if ptp_val > 0:
+                    colors = (type_ids - np.min(type_ids)) / ptp_val
+                else:
+                    colors = np.zeros_like(type_ids)
             else:
                 colors = np.zeros_like(type_ids)
             scatter = ax.scatter(
@@ -505,8 +509,16 @@ def render_scene(
                     scatter,
                     objects,
                     data.height,
+                    camera_controls=True,
                 )
                 fig._terrain_object_editor = editor  # type: ignore[attr-defined]
+
+        if show:
+            fig._terrain_camera_navigator = CameraNavigator(  # type: ignore[attr-defined]
+                fig,
+                ax,
+                terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
+            )
 
         ax.set_xlabel("X (tiles)")
         ax.set_ylabel("Y (tiles)")
@@ -526,6 +538,161 @@ def render_scene(
         plt.close(fig)
 
 
+class CameraNavigator:
+    """Adiciona controles de câmera para navegar na cena 3D."""
+
+    def __init__(
+        self,
+        fig: Figure,
+        ax: Axes,
+        *,
+        terrain_bounds: Tuple[float, float],
+        pan_fraction: float = 0.12,
+        zoom_step: float = 0.8,
+        min_window: float = 8.0,
+    ) -> None:
+        self.fig = fig
+        self.ax = ax
+        self.terrain_min, self.terrain_max = terrain_bounds
+        self.pan_fraction = pan_fraction
+        self.zoom_step = zoom_step
+        self.min_window = min_window
+        self.azim = getattr(ax, "azim", 45.0)
+        self.elev = getattr(ax, "elev", 30.0)
+
+        canvas = fig.canvas
+        self.cid_key = canvas.mpl_connect("key_press_event", self.on_key_press)
+        self.cid_scroll = canvas.mpl_connect("scroll_event", self.on_scroll)
+        self.cid_close = canvas.mpl_connect("close_event", self.on_close)
+
+        self.info_label = ax.text2D(
+            0.02,
+            0.86,
+            self._info_text(),
+            transform=ax.transAxes,
+            color="white",
+            fontsize=9,
+            ha="left",
+            va="top",
+            bbox={"facecolor": "black", "alpha": 0.5, "pad": 4},
+        )
+
+        print(
+            "Controles de câmera: WASD move, Q/E ajusta zoom, I/K altera a inclinação,",
+            "J/L gira a cena e o scroll também dá zoom.",
+        )
+
+    def _info_text(self) -> str:
+        return (
+            "WASD: mover câmera  |  Q/E: zoom  |  I/K: inclinar  |  J/L: girar\n"
+            "Scroll do mouse: zoom"
+        )
+
+    def _clamp_interval(self, lower: float, upper: float) -> Tuple[float, float]:
+        min_bound = self.terrain_min
+        max_bound = self.terrain_max
+        if lower < min_bound:
+            shift = min_bound - lower
+            lower += shift
+            upper += shift
+        if upper > max_bound:
+            shift = upper - max_bound
+            lower -= shift
+            upper -= shift
+        if lower < min_bound:
+            lower = min_bound
+        if upper > max_bound:
+            upper = max_bound
+        return lower, upper
+
+    def _apply_limits(self, x_limits: Tuple[float, float], y_limits: Tuple[float, float]) -> None:
+        self.ax.set_xlim3d(*x_limits)
+        self.ax.set_ylim3d(*y_limits)
+        self.fig.canvas.draw_idle()
+
+    def _pan(self, dx: float, dy: float) -> None:
+        x_min, x_max = self.ax.get_xlim3d()
+        y_min, y_max = self.ax.get_ylim3d()
+        width = x_max - x_min
+        height = y_max - y_min
+        if width <= 0 or height <= 0:
+            return
+        shift_x = dx * width * self.pan_fraction
+        shift_y = dy * height * self.pan_fraction
+        new_x = self._clamp_interval(x_min + shift_x, x_max + shift_x)
+        new_y = self._clamp_interval(y_min + shift_y, y_max + shift_y)
+        self._apply_limits(new_x, new_y)
+
+    def _zoom(self, factor: float) -> None:
+        x_min, x_max = self.ax.get_xlim3d()
+        y_min, y_max = self.ax.get_ylim3d()
+        width = x_max - x_min
+        height = y_max - y_min
+        center_x = (x_min + x_max) / 2.0
+        center_y = (y_min + y_max) / 2.0
+        span_limit = max(self.min_window, 1e-6)
+        max_span = max(self.terrain_max - self.terrain_min, span_limit)
+        new_width = min(max_span, max(span_limit, width * factor))
+        new_height = min(max_span, max(span_limit, height * factor))
+        x_limits = (
+            center_x - new_width / 2.0,
+            center_x + new_width / 2.0,
+        )
+        y_limits = (
+            center_y - new_height / 2.0,
+            center_y + new_height / 2.0,
+        )
+        x_limits = self._clamp_interval(*x_limits)
+        y_limits = self._clamp_interval(*y_limits)
+        self._apply_limits(x_limits, y_limits)
+
+    def _orbit(self, delta_azim: float, delta_elev: float) -> None:
+        self.azim = (self.azim + delta_azim) % 360
+        self.elev = float(np.clip(self.elev + delta_elev, -10.0, 90.0))
+        self.ax.view_init(elev=self.elev, azim=self.azim)
+        self.fig.canvas.draw_idle()
+
+    def on_key_press(self, event: KeyEvent) -> None:
+        key = (event.key or "").lower()
+        if not key:
+            return
+        if "+" in key:
+            key = key.split("+")[-1]
+        if key == "w":
+            self._pan(0.0, 1.0)
+        elif key == "s":
+            self._pan(0.0, -1.0)
+        elif key == "a":
+            self._pan(-1.0, 0.0)
+        elif key == "d":
+            self._pan(1.0, 0.0)
+        elif key == "q":
+            self._zoom(self.zoom_step)
+        elif key == "e":
+            self._zoom(1.0 / self.zoom_step)
+        elif key == "j":
+            self._orbit(-5.0, 0.0)
+        elif key == "l":
+            self._orbit(5.0, 0.0)
+        elif key == "i":
+            self._orbit(0.0, 3.0)
+        elif key == "k":
+            self._orbit(0.0, -3.0)
+
+    def on_scroll(self, event) -> None:  # type: ignore[override]
+        if getattr(event, "step", 0) > 0:
+            self._zoom(self.zoom_step)
+        else:
+            self._zoom(1.0 / self.zoom_step)
+
+    def on_close(self, _event: Optional[object]) -> None:
+        canvas = self.fig.canvas
+        canvas.mpl_disconnect(self.cid_key)
+        canvas.mpl_disconnect(self.cid_scroll)
+        canvas.mpl_disconnect(self.cid_close)
+        self.info_label.remove()
+
+
 class ObjectEditor:
     """Permite mover objetos renderizados usando eventos do Matplotlib."""
 
@@ -536,19 +703,22 @@ class ObjectEditor:
         scatter: Path3DCollection,
         objects: Sequence[TerrainObject],
         heights: np.ndarray,
+        *,
+        camera_controls: bool = False,
     ) -> None:
         self.fig = fig
         self.ax = ax
         self.scatter = scatter
         self.objects = list(objects)
         self.heights = heights
+        self.camera_controls = camera_controls
         self.selected_index: Optional[int] = None
         self.step_tiles = 0.5
 
         self.info_label = ax.text2D(
             0.02,
             0.02,
-            self._format_info_text(),
+            self._format_info_text(camera_controls),
             transform=ax.transAxes,
             color="yellow",
             fontsize=9,
@@ -580,11 +750,14 @@ class ObjectEditor:
             " o passo."
         )
 
-    def _format_info_text(self) -> str:
-        return (
+    def _format_info_text(self, camera_controls: bool) -> str:
+        text = (
             "Setas: mover objeto  |  Shift: x5  |  [: passo/2  |  ]: passo*2  "
             f"| Passo atual: {self.step_tiles:.2f} tiles"
         )
+        if camera_controls:
+            text += "\nWASD/QE/IJKL: mover câmera"
+        return text
 
     def on_pick(self, event: PickEvent) -> None:
         if event.artist is not self.scatter:
@@ -622,13 +795,13 @@ class ObjectEditor:
 
         if key == "]":
             self.step_tiles = min(self.step_tiles * 2.0, 10.0)
-            self.info_label.set_text(self._format_info_text())
+            self.info_label.set_text(self._format_info_text(self.camera_controls))
             self.fig.canvas.draw_idle()
             return
 
         if key == "[":
             self.step_tiles = max(self.step_tiles / 2.0, 0.03125)
-            self.info_label.set_text(self._format_info_text())
+            self.info_label.set_text(self._format_info_text(self.camera_controls))
             self.fig.canvas.draw_idle()
             return
 
