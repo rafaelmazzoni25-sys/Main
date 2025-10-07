@@ -2,7 +2,10 @@
 
 Este utilitário em Python recria parte do pipeline de carregamento do terreno
 (altura, atributos, mapeamento de texturas e objetos estáticos) e gera uma
-visualização rápida usando o Matplotlib.
+visualização interativa usando o Matplotlib. A partir desta versão o modo 3D
+renderiza os azulejos reais do cliente (com iluminação dinâmica), permitindo
+percorrer o mapa com os mesmos visuais vistos in-game sempre que as texturas
+`Tile*.jpg/.ozj/.ozt` estiverem presentes na pasta `WorldX`/`ObjectX`.
 
 ## Pré-requisitos
 
@@ -59,9 +62,26 @@ do zero e usa apenas ações comuns no Windows:
      correspondente quando encontrada.
    - Pressione **Visualizar** para carregar o mapa; a janela exibirá o terreno
      e uma lista dos objetos encontrados.
+   - Ajuste **Modo de visualização** para alternar entre a cena 3D padrão e a
+     nova visão 2D (heatmap) — útil para posicionar instâncias com precisão.
+   - Troque o **Overlay** para colorir o terreno pelas texturas, altura ou
+     atributos. Os campos **Mostrar apenas** e **Ocultar** filtram os objetos
+     renderizados por ID ou texto livre.
+   - Ajuste **Detalhe textura** para definir quantas subdivisões cada tile
+     recebe quando o overlay está em **Texturas** (valores maiores exibem mais
+     definição, porém exigem mais tempo de renderização).
+   - Marque **Permitir mover objetos** para habilitar a edição direta na janela
+     do Matplotlib. Selecione um ponto com o mouse e use as setas para mover a
+     instância (Shift acelera o passo, `[` e `]` ajustam a distância percorrida).
+     Após fechar a janela, use **Salvar EncTerrain** para gerar um novo
+     `EncTerrainXX.obj` com as posições atualizadas.
+   - Use **WASD** para transladar a câmera pela cena 3D, **Q/E** para aproximar
+     ou afastar, **I/K** para inclinar a vista e **J/L** para orbitar; o scroll
+     do mouse também ajusta o zoom rapidamente.
    - Para gerar relatórios rápidos, utilize os botões **Resumo** (exibe
-     estatísticas detalhadas) ou **Exportar objetos** (salva um CSV com a lista
-     completa de instâncias do mapa).
+     estatísticas detalhadas), **Exportar objetos** (salva um CSV com a lista
+     filtrada), **Exportar JSON** (gera um arquivo estruturado para scripts) ou
+     **Salvar EncTerrain** (persiste as edições realizadas).
 
 > Dica: Se você quiser apenas gerar uma imagem, clique em **Salvar PNG** e
 > escolha onde guardar o arquivo. O processo leva alguns segundos em mapas
@@ -78,8 +98,10 @@ continuam abaixo.
 1. Extraia os arquivos do cliente em uma pasta acessível. Você precisará do
    diretório `Data/WorldX` correspondente ao mapa que deseja visualizar com os
    arquivos `EncTerrain*.att`, `EncTerrain*.map` e `TerrainHeight.OZB` (ou
-   `TerrainHeightNew.OZB`). Se os objetos estiverem separados em `Data/ObjectX`,
-   mantenha essa pasta acessível também.
+   `TerrainHeightNew.OZB`). Para que o terreno apareça texturizado como no
+   jogo, mantenha também os arquivos `Tile*.jpg/.ozj/.ozt` fornecidos pelo
+   cliente. Se os objetos estiverem separados em `Data/ObjectX`, mantenha essa
+   pasta acessível também.
 
 ### Interface gráfica
 
@@ -89,16 +111,23 @@ permite:
 1. Escolher a pasta `Data` por meio de um seletor de diretórios.
 2. Selecionar qual `WorldX` carregar usando um drop-down preenchido
    automaticamente com base na pasta escolhida.
-3. Ajustar opções como `Map ID`, escala de altura, limite de objetos e, se
-   necessário, apontar explicitamente para uma pasta `ObjectX`.
+3. Ajustar opções como `Map ID`, escala de altura, limite de objetos, modo de
+   visualização (3D/2D), overlay (texturas/altura/atributos) e filtros para
+   mostrar ou ocultar tipos específicos. Também é possível apontar
+   explicitamente para uma pasta `ObjectX`.
 
 Ao clicar em **Visualizar**, o terreno e os objetos são carregados e exibidos.
 O rodapé da janela mostra um resumo com a contagem total de objetos e os tipos
 mais frequentes (com nomes extraídos do `_enum.h` do cliente). Também é
 possível gerar uma imagem PNG diretamente pelo botão **Salvar PNG**. Caso
-precise analisar os dados, use **Resumo** para visualizar estatísticas (altura,
-atributos e texturas) e **Exportar objetos** para salvar um CSV com todas as
-instâncias posicionadas no mapa.
+precise analisar os dados, use **Resumo** para visualizar estatísticas
+(altura/atributos/texturas), **Exportar objetos** ou **Exportar JSON** para
+obter a lista filtrada em CSV/JSON, e **Salvar EncTerrain** para persistir as
+edições feitas no editor interativo.
+
+Quando a visualização 3D estiver aberta, utilize **WASD/QE/IJKL** para navegar
+livremente pela cena. As setas do teclado continuam dedicadas ao movimento dos
+objetos selecionados, enquanto o scroll do mouse oferece um zoom incremental.
 
 ### Linha de comando
 
@@ -120,9 +149,11 @@ em nomes legíveis.
 
 ### Exportando e inspecionando dados
 
-- `--export-objects caminho.csv`: grava um CSV com todos os objetos, incluindo
-  posição, ângulos, escala e as coordenadas em tiles. É útil para importar a
-  lista em ferramentas externas ou planilhas.
+- `--export-objects caminho.csv`: grava um CSV com os objetos visíveis na
+  visualização atual, incluindo posição, ângulos, escala e as coordenadas em
+  tiles. É útil para importar a lista em ferramentas externas ou planilhas.
+- `--export-json caminho.json`: exporta o mesmo conjunto filtrado em formato
+  JSON, junto com estatísticas básicas de altura e o histograma de atributos.
 - `--detailed-summary`: exibe estatísticas adicionais diretamente no terminal,
   como altura mínima/máxima, quantidade de texturas utilizadas e os atributos
   mais comuns.
@@ -137,6 +168,19 @@ em nomes legíveis.
   com milhares de instâncias).
 - `--object-path`: aponta diretamente para a pasta `ObjectX` quando os objetos
   não estão junto do `WorldX`.
+- `--view-mode`: alterna entre o modo 3D tradicional e a visualização 2D
+  (heatmap) com sobreposição plana.
+- `--overlay`: define o mapa de cores do terreno (texturas, altura ou
+  atributos).
+- `--texture-detail`: controla a densidade da malha quando o overlay está em
+  texturas. Valores altos (4, 8...) deixam os azulejos mais nítidos às custas de
+  maior tempo de renderização.
+- `--filter` / `--exclude`: incluem ou ocultam objetos cujo ID ou nome contenha
+  o texto informado (argumento pode ser repetido).
+- `--save-objects`: grava um novo arquivo `EncTerrainXX.obj` criptografado com
+  as posições atuais (ideal após mover objetos na interface interativa).
+- `--edit-objects`: habilita a movimentação das instâncias exibidas (janela
+  interativa obrigatória, remova `--no-show`).
 - `--no-show`: evita abrir a janela interativa do Matplotlib.
 - `--output`: caminho do arquivo PNG de saída.
 - `--height-scale`: ajusta o fator aplicado ao formato clássico de altura (1.5
@@ -157,10 +201,33 @@ em nomes legíveis.
   se você estiver usando uma versão antiga basta marcar a opção **Forçar
   TerrainHeightNew** na interface (ou executar com `--extended-height`).
 
+## Possíveis melhorias
+
+Algumas ideias de evolução que podem deixar o visualizador mais prático no dia
+a dia:
+
+- **Histórico de edições com desfazer/refazer.** Registrar cada movimento e
+  permitir desfazer etapas facilitaria experimentos mais longos sem medo de
+  perder o progresso.
+- **Snapping inteligente.** Adicionar alinhamento por grade, altura ou objetos
+  vizinhos ajudaria a posicionar modelos complexos com mais precisão.
+- **Edição de atributos e texturas.** Estender o editor para permitir ajustes
+  diretos em `TerrainAttribute` e nas camadas de textura, atualizando os
+  arquivos `.att/.map` no mesmo fluxo.
+- **Comparação entre revisões.** Uma visualização lado a lado (ou modo diff)
+  destacaria objetos adicionados/removidos entre duas pastas `WorldX`.
+- **Renderização com recursos do jogo.** Carregar as texturas reais e aplicar
+  shaders/iluminação aproximada deixaria a prévia ainda mais próxima do cliente.
+
 ## Exemplo
 
 ```bash
 python terrain_viewer.py /caminho/para/Data/World7 --max-objects 500 --output world7.png --no-show
+```
+
+```bash
+python terrain_viewer.py /caminho/para/Data/World7 --view-mode 2d --overlay height \
+    --filter MODEL_TREE --export-json world7_trees.json --no-show
 ```
 
 O script decodifica os arquivos criptografados usando as mesmas rotinas inline
