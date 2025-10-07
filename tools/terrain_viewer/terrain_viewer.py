@@ -21,7 +21,19 @@ import time
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -114,6 +126,14 @@ TRANSPARENT_TILE_IDS = {2, 3, 4, 5, 10, 11, 12, 44, 45, 46, 47}
 MATERIAL_WATER = 1 << 0
 MATERIAL_LAVA = 1 << 1
 MATERIAL_TRANSPARENT = 1 << 2
+MATERIAL_ADDITIVE = 1 << 3
+MATERIAL_EMISSIVE = 1 << 4
+MATERIAL_ALPHA_TEST = 1 << 5
+MATERIAL_DOUBLE_SIDED = 1 << 6
+MATERIAL_NO_SHADOW = 1 << 7
+MATERIAL_NORMAL_MAP = 1 << 8
+
+MAX_POINT_LIGHTS = 8
 
 
 def _eval_int_expression(expr: str, env: Mapping[str, int]) -> int:
@@ -227,6 +247,287 @@ class TerrainData:
 
 
 @dataclass
+class MaterialState:
+    name: str
+    src_blend: str = "one"
+    dst_blend: str = "zero"
+    blend_op: str = "add"
+    alpha_test: bool = False
+    alpha_func: str = "always"
+    alpha_ref: float = 0.0
+    depth_write: bool = True
+    depth_test: bool = True
+    cull_mode: str = "back"
+    emissive: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    specular: Tuple[float, float, float] = (0.2, 0.2, 0.2)
+    specular_power: float = 16.0
+    double_sided: bool = False
+    additive: bool = False
+    transparent: bool = False
+    water: bool = False
+    lava: bool = False
+    normal_map: Optional[str] = None
+    receive_shadows: bool = True
+
+    def to_flags(self) -> int:
+        flags = 0
+        if self.water:
+            flags |= MATERIAL_WATER | MATERIAL_TRANSPARENT
+        if self.lava:
+            flags |= MATERIAL_LAVA | MATERIAL_TRANSPARENT
+        if self.transparent:
+            flags |= MATERIAL_TRANSPARENT
+        if self.additive:
+            flags |= MATERIAL_ADDITIVE
+        if np.linalg.norm(self.emissive) > 1e-3:
+            flags |= MATERIAL_EMISSIVE
+        if self.alpha_test:
+            flags |= MATERIAL_ALPHA_TEST
+        if self.double_sided or self.cull_mode.lower() == "none":
+            flags |= MATERIAL_DOUBLE_SIDED
+        if not self.receive_shadows:
+            flags |= MATERIAL_NO_SHADOW
+        if self.normal_map:
+            flags |= MATERIAL_NORMAL_MAP
+        return flags
+
+
+class MaterialStateLibrary:
+    def __init__(
+        self,
+        world_path: Optional[Path] = None,
+        *,
+        extra_roots: Sequence[Path] = (),
+    ) -> None:
+        roots: List[Path] = []
+        if world_path is not None:
+            world_root = world_path.parent if world_path.is_file() else world_path
+            if world_root.exists():
+                roots.append(world_root)
+                textures = world_root / "Texture"
+                if textures.exists():
+                    roots.append(textures)
+        for root in extra_roots:
+            if root.exists():
+                resolved = root.resolve()
+                if resolved not in roots:
+                    roots.append(resolved)
+        self.search_roots = roots
+        self._states: Dict[str, MaterialState] = {}
+        self._aliases: Dict[str, str] = {}
+        self._load_tables()
+
+    def _normalize_key(self, name: str) -> str:
+        lowered = name.replace("\\", "/").lower()
+        for ext in IMAGE_EXTENSIONS + (".dds",):
+            if lowered.endswith(ext.lower()):
+                lowered = lowered[: -len(ext)]
+        return lowered
+
+    def _iter_candidate_files(self) -> Iterator[Path]:
+        candidates = (
+            "materials.json",
+            "material_table.json",
+            "material_table.txt",
+            "material_table.csv",
+            "materialstate.json",
+            "materialstate.txt",
+        )
+        for root in self.search_roots:
+            for name in candidates:
+                path = root / name
+                if path.is_file():
+                    yield path
+
+    def _load_tables(self) -> None:
+        for table in self._iter_candidate_files():
+            try:
+                suffix = table.suffix.lower()
+                if suffix == ".json":
+                    self._load_json(table)
+                elif suffix == ".csv":
+                    self._load_csv(table)
+                else:
+                    self._load_txt(table)
+            except Exception:  # noqa: BLE001
+                continue
+
+    def _load_json(self, path: Path) -> None:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, Mapping):
+            entries = payload.items()
+        elif isinstance(payload, Sequence):
+            entries = []
+            for item in payload:
+                if isinstance(item, Mapping) and "name" in item:
+                    entries.append((item["name"], item))
+        else:
+            return
+        for key, value in entries:  # type: ignore[arg-type]
+            self._store_entry(str(key), value)
+
+    def _load_csv(self, path: Path) -> None:
+        with path.open(newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                name = row.get("name") or row.get("texture")
+                if not name:
+                    continue
+                self._store_entry(name, row)
+
+    def _load_txt(self, path: Path) -> None:
+        with path.open(encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" in line:
+                    key, _, rest = line.partition(":")
+                    data = {"params": rest.strip()}
+                    self._store_entry(key.strip(), data)
+                    continue
+                parts = [part.strip() for part in line.split(",")]
+                if not parts:
+                    continue
+                name = parts[0]
+                values = {
+                    "src_blend": parts[1] if len(parts) > 1 else "one",
+                    "dst_blend": parts[2] if len(parts) > 2 else "zero",
+                    "alpha_test": parts[3] if len(parts) > 3 else "false",
+                    "alpha_ref": parts[4] if len(parts) > 4 else "0",
+                    "depth_write": parts[5] if len(parts) > 5 else "true",
+                    "depth_test": parts[6] if len(parts) > 6 else "true",
+                    "cull_mode": parts[7] if len(parts) > 7 else "back",
+                }
+                self._store_entry(name, values)
+
+    def _parse_bool(self, value: object, *, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    def _parse_vec3(self, value: object) -> Tuple[float, float, float]:
+        if isinstance(value, Sequence) and len(value) >= 3:
+            return (float(value[0]), float(value[1]), float(value[2]))
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.replace(";", ",").split(",") if part.strip()]
+            if len(parts) >= 3:
+                return (float(parts[0]), float(parts[1]), float(parts[2]))
+        return (0.0, 0.0, 0.0)
+
+    def _store_entry(self, name: str, payload: Mapping[str, object]) -> None:
+        normalized = self._normalize_key(name)
+        state = MaterialState(
+            name=normalized,
+            src_blend=str(payload.get("src_blend", payload.get("src", "one"))).lower(),
+            dst_blend=str(payload.get("dst_blend", payload.get("dst", "zero"))).lower(),
+            blend_op=str(payload.get("blend_op", payload.get("op", "add"))).lower(),
+            alpha_test=self._parse_bool(payload.get("alpha_test", payload.get("alpha", False))),
+            alpha_func=str(payload.get("alpha_func", payload.get("alpha_compare", "greater"))).lower(),
+            alpha_ref=float(payload.get("alpha_ref", payload.get("alpha_value", 0.0)) or 0.0),
+            depth_write=self._parse_bool(payload.get("depth_write", payload.get("zwrite", True)), default=True),
+            depth_test=self._parse_bool(payload.get("depth_test", payload.get("ztest", True)), default=True),
+            cull_mode=str(payload.get("cull_mode", payload.get("cull", "back"))).lower(),
+            emissive=self._parse_vec3(payload.get("emissive", payload.get("emissive_color", (0, 0, 0)))),
+            specular=self._parse_vec3(payload.get("specular", payload.get("specular_color", (0.2, 0.2, 0.2)))),
+            specular_power=float(payload.get("specular_power", payload.get("power", 16.0)) or 16.0),
+            double_sided=self._parse_bool(payload.get("double_sided", payload.get("two_sided", False))),
+            additive=self._parse_bool(payload.get("additive", payload.get("blend_add", False))),
+            transparent=self._parse_bool(payload.get("transparent", payload.get("alpha_blend", False))),
+            water=self._parse_bool(payload.get("water", False)),
+            lava=self._parse_bool(payload.get("lava", False)),
+            normal_map=str(payload.get("normal_map", payload.get("normal", ""))) or None,
+            receive_shadows=self._parse_bool(payload.get("receive_shadows", payload.get("shadow", True)), default=True),
+        )
+        self._states[normalized] = state
+        base = Path(normalized).stem
+        if base and base not in self._states:
+            self._aliases[base] = normalized
+
+    def lookup(self, texture_name: str) -> MaterialState:
+        if not texture_name:
+            return MaterialState(name="")
+        key = self._normalize_key(texture_name)
+        if key in self._states:
+            return self._states[key]
+        base = Path(key).stem
+        if base in self._states:
+            return self._states[base]
+        alias = self._aliases.get(key)
+        if alias and alias in self._states:
+            return self._states[alias]
+        return self._build_fallback(texture_name)
+
+    def _build_fallback(self, texture_name: str) -> MaterialState:
+        lowered = texture_name.lower()
+        state = MaterialState(name=self._normalize_key(texture_name))
+        if any(token in lowered for token in ("water", "river", "wave", "ocean", "sea")):
+            state.water = True
+            state.transparent = True
+            state.depth_write = False
+            state.src_blend = "src_alpha"
+            state.dst_blend = "one_minus_src_alpha"
+        if any(token in lowered for token in ("lava", "magma", "volcano", "fire")):
+            state.lava = True
+            state.transparent = True
+            state.additive = True
+            state.src_blend = "src_alpha"
+            state.dst_blend = "one"
+        if any(token in lowered for token in ("alpha", "glass", "trans", "smoke", "light", "flare")):
+            state.transparent = True
+            state.src_blend = "src_alpha"
+            state.dst_blend = "one_minus_src_alpha"
+        if "emissive" in lowered or "light" in lowered:
+            state.emissive = (0.6, 0.6, 0.6)
+        return state
+
+    def flags_for_texture(self, texture_name: str) -> int:
+        return self.lookup(texture_name).to_flags()
+
+    def flags_for_tile(self, texture_name: str) -> int:
+        return self.flags_for_texture(texture_name)
+
+
+_FALLBACK_MATERIAL_LIBRARY = MaterialStateLibrary()
+
+
+def _resolve_material_state(
+    texture_name: str,
+    material_library: Optional[MaterialStateLibrary],
+) -> MaterialState:
+    if material_library is not None:
+        return material_library.lookup(texture_name)
+    return _FALLBACK_MATERIAL_LIBRARY.lookup(texture_name)
+
+
+def _blend_factor(name: str) -> int:
+    if moderngl is None:
+        raise RuntimeError("Blending avançado requer moderngl instalado.")
+    mapping = {
+        "zero": moderngl.ZERO,
+        "one": moderngl.ONE,
+        "src_alpha": moderngl.SRC_ALPHA,
+        "one_minus_src_alpha": moderngl.ONE_MINUS_SRC_ALPHA,
+        "dst_alpha": moderngl.DST_ALPHA,
+        "one_minus_dst_alpha": moderngl.ONE_MINUS_DST_ALPHA,
+        "src_color": moderngl.SRC_COLOR,
+        "one_minus_src_color": moderngl.ONE_MINUS_SRC_COLOR,
+        "dst_color": moderngl.DST_COLOR,
+        "one_minus_dst_color": moderngl.ONE_MINUS_DST_COLOR,
+    }
+    key = name.strip().lower()
+    return mapping.get(key, moderngl.SRC_ALPHA)
+
+
+@dataclass
 class TerrainObject:
     type_id: int
     position: Tuple[float, float, float]
@@ -248,6 +549,7 @@ class BMDMesh:
     indices: np.ndarray
     texture_name: str
     material_flags: int = 0
+    material_state: MaterialState = field(default_factory=lambda: MaterialState(name=""))
     bone_indices: Optional[np.ndarray] = None
 
 
@@ -256,6 +558,7 @@ class BMDKeyframe:
     translation: np.ndarray
     rotation: np.ndarray
     time: float
+    rotation_quat: np.ndarray
 
 
 @dataclass
@@ -265,11 +568,33 @@ class BMDAnimationChannel:
 
 
 @dataclass
+class BMDAnimationEvent:
+    name: str
+    time: float
+    params: Tuple[float, ...] = ()
+
+
+@dataclass
 class BMDAnimation:
     name: str
     duration: float
     frames_per_second: float
     channels: Dict[int, BMDAnimationChannel] = field(default_factory=dict)
+    events: List[BMDAnimationEvent] = field(default_factory=list)
+    default_blend: float = 0.25
+
+
+@dataclass
+class BMDHardpoint:
+    name: str
+    bone_index: int
+    offset: np.ndarray
+    rotation_quat: np.ndarray
+    is_billboard: bool = False
+    color: np.ndarray = field(default_factory=lambda: np.array([1.0, 1.0, 1.0], dtype=np.float32))
+    radius: float = 1200.0
+    velocity: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
+    size: float = 1.0
 
 
 @dataclass
@@ -278,6 +603,7 @@ class BMDBone:
     parent: int
     rest_translation: np.ndarray
     rest_rotation: np.ndarray
+    rest_quaternion: np.ndarray
     rest_matrix: np.ndarray
     inverse_bind_matrix: np.ndarray
 
@@ -289,6 +615,8 @@ class BMDModel:
     version: int = 0
     bones: List[BMDBone] = field(default_factory=list)
     animations: Dict[str, BMDAnimation] = field(default_factory=dict)
+    attachments: List[BMDHardpoint] = field(default_factory=list)
+    billboards: List[BMDHardpoint] = field(default_factory=list)
 
     @property
     def has_transparency(self) -> bool:
@@ -338,6 +666,50 @@ def _bilinear_resize(matrix: np.ndarray, factor: int) -> np.ndarray:
     for x_idx in range(new_width):
         result[:, x_idx] = np.interp(dst_y, src_y, temp[:, x_idx])
     return result
+
+
+def _compute_normal_map(heights: np.ndarray, spacing: float) -> np.ndarray:
+    if heights.ndim != 2:
+        raise ValueError("Mapa de altura deve ser bidimensional para gerar normal map.")
+    grad_y, grad_x = np.gradient(heights, spacing, spacing)
+    normals = np.stack((-grad_x, np.ones_like(grad_x), -grad_y), axis=2)
+    lengths = np.linalg.norm(normals, axis=2, keepdims=True)
+    lengths = np.where(lengths == 0.0, 1.0, lengths)
+    normalized = normals / lengths
+    return normalized[:-1, :-1, :]
+
+
+def _compute_shadow_mask(heights: np.ndarray, light_dir: np.ndarray, step_scale: float) -> np.ndarray:
+    h, w = heights.shape
+    if h < 2 or w < 2:
+        return np.ones((h, w), dtype=np.float32)
+    dir2d = np.array([light_dir[0], light_dir[2]], dtype=np.float32)
+    length = float(np.linalg.norm(dir2d))
+    if length == 0.0:
+        return np.ones((h - 1, w - 1), dtype=np.float32)
+    dir2d /= length
+    steps = 64
+    mask = np.ones((h - 1, w - 1), dtype=np.float32)
+    for y in range(h - 1):
+        for x in range(w - 1):
+            base_height = heights[y, x]
+            shadowed = False
+            px = float(x)
+            py = float(y)
+            for step in range(1, steps):
+                px += dir2d[0]
+                py += dir2d[1]
+                ix = int(px)
+                iy = int(py)
+                if ix < 0 or iy < 0 or ix >= w - 1 or iy >= h - 1:
+                    break
+                sample_height = heights[iy, ix]
+                expected = base_height + light_dir[1] * step * step_scale
+                if sample_height > expected:
+                    shadowed = True
+                    break
+            mask[y, x] = 0.35 if shadowed else 1.0
+    return mask
 
 
 def _ensure_rgba(image: np.ndarray) -> np.ndarray:
@@ -509,6 +881,12 @@ class TextureLibrary:
         self._resized_cache[cache_key] = tile.astype(np.float32)
         return self._resized_cache[cache_key]
 
+    def tile_texture_name(self, index: int) -> Optional[str]:
+        candidates = TILE_TEXTURE_CANDIDATES.get(index, [])
+        if candidates:
+            return candidates[0]
+        return None
+
     def compose_texture_pixels(
         self,
         layer1: np.ndarray,
@@ -557,22 +935,38 @@ class TextureLibrary:
 
 
 def compute_tile_material_flags(
-    layer1: np.ndarray, layer2: np.ndarray, alpha: np.ndarray
+    layer1: np.ndarray,
+    layer2: np.ndarray,
+    alpha: np.ndarray,
+    texture_library: TextureLibrary,
+    material_library: Optional[MaterialStateLibrary],
 ) -> np.ndarray:
     flags = np.zeros_like(layer1, dtype=np.uint32)
     if layer1.size == 0:
         return flags
-    for tile_ids, flag in ((WATER_TILE_IDS, MATERIAL_WATER), (LAVA_TILE_IDS, MATERIAL_LAVA)):
-        if tile_ids:
-            mask1 = np.isin(layer1, list(tile_ids))
-            mask2 = (alpha > 0.01) & np.isin(layer2, list(tile_ids))
-            flags[mask1] |= flag
-            flags[mask2] |= flag
-    if TRANSPARENT_TILE_IDS:
-        mask1 = np.isin(layer1, list(TRANSPARENT_TILE_IDS))
-        mask2 = (alpha > 0.01) & np.isin(layer2, list(TRANSPARENT_TILE_IDS))
-        flags[mask1] |= MATERIAL_TRANSPARENT
-        flags[mask2] |= MATERIAL_TRANSPARENT
+
+    cache: Dict[int, int] = {}
+
+    def tile_flags(index: int) -> int:
+        if index in cache:
+            return cache[index]
+        if index < 0 or index == 255:
+            cache[index] = 0
+            return 0
+        texture_name = texture_library.tile_texture_name(index) or f"ExtTile{index:02d}"
+        state = _resolve_material_state(texture_name, material_library)
+        cache[index] = state.to_flags()
+        return cache[index]
+
+    it = np.ndindex(layer1.shape)
+    for coord in it:
+        idx1 = int(layer1[coord])
+        idx2 = int(layer2[coord])
+        base = tile_flags(idx1)
+        overlay = 0
+        if idx2 != 255 and float(alpha[coord]) > 0.01:
+            overlay = tile_flags(idx2)
+        flags[coord] = base | overlay
     return flags
 
 
@@ -608,20 +1002,80 @@ def _sanitize_c_string(raw: bytes) -> str:
     return text.decode("latin1", errors="ignore").strip()
 
 
-def _classify_mesh_material(texture_name: str) -> int:
-    lowered = texture_name.lower()
-    flags = 0
-    if any(token in lowered for token in ("water", "river", "wave", "ocean", "sea")):
-        flags |= MATERIAL_WATER | MATERIAL_TRANSPARENT
-    if any(token in lowered for token in ("lava", "magma", "volcano", "fire")):
-        flags |= MATERIAL_LAVA | MATERIAL_TRANSPARENT
-    if any(token in lowered for token in ("alpha", "glass", "trans", "smoke", "light", "flare")):
-        flags |= MATERIAL_TRANSPARENT
-    return flags
-
-
 def _lerp_vec(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
     return a + (b - a) * t
+
+
+def _quat_normalize(quat: np.ndarray) -> np.ndarray:
+    quat = quat.astype(np.float32, copy=False)
+    norm = float(np.linalg.norm(quat))
+    if norm == 0.0:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    return quat / norm
+
+
+def _quat_from_axis_angle(axis: Tuple[float, float, float], angle: float) -> np.ndarray:
+    half = angle * 0.5
+    s = math.sin(half)
+    x, y, z = axis
+    return np.array([x * s, y * s, z * s, math.cos(half)], dtype=np.float32)
+
+
+def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array(
+        [
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _quat_from_euler_deg(rotation_deg: np.ndarray) -> np.ndarray:
+    rx, ry, rz = np.radians(rotation_deg.astype(np.float32))
+    qx = _quat_from_axis_angle((1.0, 0.0, 0.0), rx)
+    qy = _quat_from_axis_angle((0.0, 1.0, 0.0), ry)
+    qz = _quat_from_axis_angle((0.0, 0.0, 1.0), rz)
+    quat = _quat_multiply(_quat_multiply(qz, qy), qx)
+    return _quat_normalize(quat)
+
+
+def _quat_to_matrix(quat: np.ndarray) -> np.ndarray:
+    x, y, z, w = quat
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    return np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _quat_slerp(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+    a = _quat_normalize(a)
+    b = _quat_normalize(b)
+    dot = float(np.dot(a, b))
+    if dot < 0.0:
+        b = -b
+        dot = -dot
+    dot = min(max(dot, -1.0), 1.0)
+    if dot > 0.9995:
+        return _quat_normalize(a + t * (b - a))
+    theta_0 = math.acos(dot)
+    sin_theta_0 = math.sin(theta_0)
+    theta = theta_0 * t
+    sin_theta = math.sin(theta)
+    s0 = math.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return _quat_normalize((a * s0) + (b * s1))
 
 
 def _compose_transform_matrix(translation: np.ndarray, rotation_deg: np.ndarray) -> np.ndarray:
@@ -641,7 +1095,17 @@ def _compose_transform_matrix(translation: np.ndarray, rotation_deg: np.ndarray)
     return matrix
 
 
-def load_bmd_model(path: Path) -> BMDModel:
+def _compose_transform_quaternion(translation: np.ndarray, rotation_quat: np.ndarray) -> np.ndarray:
+    matrix = np.eye(4, dtype=np.float32)
+    matrix[:3, :3] = _quat_to_matrix(rotation_quat)
+    matrix[:3, 3] = translation.astype(np.float32, copy=False)
+    return matrix
+
+
+def load_bmd_model(
+    path: Path,
+    material_library: Optional[MaterialStateLibrary] = None,
+) -> BMDModel:
     raw = _read_file(path)
     if len(raw) < 7 or not raw.startswith(b"BMD"):
         raise ValueError(f"Arquivo BMD inválido: {path}")
@@ -762,6 +1226,7 @@ def load_bmd_model(path: Path) -> BMDModel:
             normals = np.asarray(mesh_normals, dtype=np.float32)
             uvs = np.asarray(mesh_uvs, dtype=np.float32)
             indices = np.arange(len(positions), dtype=np.uint32)
+            material_state = _resolve_material_state(texture_name, material_library)
             meshes.append(
                 BMDMesh(
                     name=f"{name}_mesh{mesh_index}",
@@ -770,7 +1235,8 @@ def load_bmd_model(path: Path) -> BMDModel:
                     texcoords=uvs,
                     indices=indices,
                     texture_name=texture_name,
-                    material_flags=_classify_mesh_material(texture_name),
+                    material_flags=material_state.to_flags(),
+                    material_state=material_state,
                     bone_indices=np.asarray(mesh_bones, dtype=np.int16) if mesh_bones else None,
                 )
             )
@@ -849,12 +1315,14 @@ def load_bmd_model(path: Path) -> BMDModel:
                 ptr += 12
                 rest_rotation = np.array(struct.unpack_from("<3f", data, ptr), dtype=np.float32)
                 ptr += 12
+            rest_quaternion = _quat_from_euler_deg(rest_rotation)
 
             bone = BMDBone(
                 name=bone_name or f"bone_{len(bones)}",
                 parent=parent,
                 rest_translation=rest_translation,
                 rest_rotation=rest_rotation,
+                rest_quaternion=rest_quaternion,
                 rest_matrix=np.eye(4, dtype=np.float32),
                 inverse_bind_matrix=np.eye(4, dtype=np.float32),
             )
@@ -898,6 +1366,7 @@ def load_bmd_model(path: Path) -> BMDModel:
                             translation=translation.astype(np.float32),
                             rotation=rotation.astype(np.float32),
                             time=time_value,
+                            rotation_quat=_quat_from_euler_deg(rotation),
                         )
                     )
                 if channel.keyframes:
@@ -905,7 +1374,7 @@ def load_bmd_model(path: Path) -> BMDModel:
 
         rest_globals: List[np.ndarray] = []
         for idx, bone in enumerate(bones):
-            local = _compose_transform_matrix(bone.rest_translation, bone.rest_rotation)
+            local = _compose_transform_quaternion(bone.rest_translation, bone.rest_quaternion)
             if 0 <= bone.parent < len(rest_globals):
                 global_matrix = rest_globals[bone.parent] @ local
             else:
@@ -936,11 +1405,170 @@ def load_bmd_model(path: Path) -> BMDModel:
         raise ValueError(f"Falha ao decodificar {path}: {exc}") from exc
 
     model = BMDModel(name=name, meshes=meshes, version=version, bones=bones, animations=animations)
+    metadata = _load_bmd_metadata(path)
+    if metadata:
+        _apply_bmd_metadata(model, metadata)
     return model
 
 
+def _load_bmd_metadata(path: Path) -> Optional[Mapping[str, object]]:
+    candidates = [
+        path.with_suffix(".meta.json"),
+        Path(f"{path}.meta.json"),
+        path.with_suffix(".json"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def _parse_event_list(raw: object) -> List[BMDAnimationEvent]:
+    events: List[BMDAnimationEvent] = []
+    if isinstance(raw, Sequence):
+        for item in raw:
+            if isinstance(item, Mapping):
+                name = str(item.get("name") or item.get("event") or "")
+                if not name:
+                    continue
+                time_value = float(item.get("time", 0.0) or 0.0)
+                params_raw = item.get("params", [])
+                params: List[float] = []
+                if isinstance(params_raw, Sequence):
+                    for value in params_raw[:4]:
+                        try:
+                            params.append(float(value))
+                        except (TypeError, ValueError):
+                            params.append(0.0)
+                events.append(BMDAnimationEvent(name=name, time=time_value, params=tuple(params)))
+            elif isinstance(item, str):
+                if "@" in item:
+                    name_part, _, time_part = item.partition("@")
+                    try:
+                        time_value = float(time_part)
+                    except ValueError:
+                        time_value = 0.0
+                    events.append(BMDAnimationEvent(name=name_part.strip(), time=time_value))
+                else:
+                    events.append(BMDAnimationEvent(name=item.strip(), time=0.0))
+    return sorted(events, key=lambda event: event.time)
+
+
+def _apply_bmd_metadata(model: BMDModel, payload: Mapping[str, object]) -> None:
+    bone_lookup: Dict[str, int] = {
+        bone.name.lower(): index for index, bone in enumerate(model.bones)
+    }
+
+    attachments_raw = payload.get("attachments")
+    if isinstance(attachments_raw, Sequence):
+        for entry in attachments_raw:
+            if not isinstance(entry, Mapping):
+                continue
+            bone_ref = entry.get("bone")
+            bone_index: Optional[int] = None
+            if isinstance(bone_ref, str):
+                bone_index = bone_lookup.get(bone_ref.lower())
+            elif isinstance(bone_ref, int):
+                bone_index = bone_ref
+            if bone_index is None or bone_index < 0 or bone_index >= len(model.bones):
+                continue
+            name = str(entry.get("name") or entry.get("id") or f"attachment_{len(model.attachments)}")
+            offset_raw = entry.get("offset", (0.0, 0.0, 0.0))
+            if isinstance(offset_raw, Sequence) and len(offset_raw) >= 3:
+                offset = np.array([float(offset_raw[0]), float(offset_raw[1]), float(offset_raw[2])], dtype=np.float32)
+            else:
+                offset = np.zeros(3, dtype=np.float32)
+            rotation_raw = entry.get("rotation_quat") or entry.get("rotation")
+            if isinstance(rotation_raw, Sequence):
+                values = list(rotation_raw)
+                if len(values) >= 4:
+                    quat = _quat_normalize(np.array(values[:4], dtype=np.float32))
+                else:
+                    quat = _quat_from_euler_deg(np.array(values[:3], dtype=np.float32))
+            else:
+                quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            color = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+            color_raw = entry.get("color") or entry.get("colour")
+            if isinstance(color_raw, Sequence) and len(color_raw) >= 3:
+                try:
+                    color = np.array(
+                        [float(color_raw[0]), float(color_raw[1]), float(color_raw[2])],
+                        dtype=np.float32,
+                    )
+                except (TypeError, ValueError):
+                    color = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+            radius_raw = entry.get("radius") or entry.get("range") or entry.get("distance")
+            try:
+                radius = float(radius_raw) if radius_raw is not None else 1200.0
+            except (TypeError, ValueError):
+                radius = 1200.0
+            velocity = np.zeros(3, dtype=np.float32)
+            velocity_raw = entry.get("velocity") or entry.get("speed")
+            if isinstance(velocity_raw, Sequence) and len(velocity_raw) >= 3:
+                try:
+                    velocity = np.array(
+                        [float(velocity_raw[0]), float(velocity_raw[1]), float(velocity_raw[2])],
+                        dtype=np.float32,
+                    )
+                except (TypeError, ValueError):
+                    velocity = np.zeros(3, dtype=np.float32)
+            size_raw = entry.get("size") or entry.get("scale")
+            try:
+                size = float(size_raw) if size_raw is not None else 1.0
+            except (TypeError, ValueError):
+                size = 1.0
+
+            hardpoint = BMDHardpoint(
+                name=name,
+                bone_index=int(bone_index),
+                offset=offset,
+                rotation_quat=quat,
+                is_billboard=bool(entry.get("billboard") or str(entry.get("type", "")).lower() == "billboard"),
+                color=color,
+                radius=radius,
+                velocity=velocity,
+                size=size,
+            )
+            if hardpoint.is_billboard:
+                model.billboards.append(hardpoint)
+            else:
+                model.attachments.append(hardpoint)
+
+    animations_meta = payload.get("animations")
+    if isinstance(animations_meta, Mapping):
+        for name, meta in animations_meta.items():
+            if name not in model.animations:
+                continue
+            animation = model.animations[name]
+            if isinstance(meta, Mapping):
+                if "default_blend" in meta:
+                    try:
+                        animation.default_blend = float(meta["default_blend"])
+                    except (TypeError, ValueError):
+                        pass
+                if "events" in meta:
+                    animation.events = _parse_event_list(meta["events"])
+
+    events_meta = payload.get("events")
+    if isinstance(events_meta, Mapping):
+        for name, events in events_meta.items():
+            if name in model.animations:
+                model.animations[name].events = _parse_event_list(events)
+
+    default_events = payload.get("default_events")
+    if isinstance(default_events, Sequence):
+        for animation in model.animations.values():
+            if not animation.events:
+                animation.events = _parse_event_list(default_events)
 class BMDLibrary:
-    def __init__(self, search_roots: Sequence[Path]) -> None:
+    def __init__(
+        self,
+        search_roots: Sequence[Path],
+        material_library: Optional[MaterialStateLibrary] = None,
+    ) -> None:
         unique_roots = []
         for root in search_roots:
             if root and root.exists() and root.is_dir():
@@ -951,6 +1579,7 @@ class BMDLibrary:
         self._index: Dict[str, List[Path]] = defaultdict(list)
         self._cache: Dict[Path, BMDModel] = {}
         self._failures: Dict[str, str] = {}
+        self.material_library = material_library
         self._build_index()
 
     def _build_index(self) -> None:
@@ -998,7 +1627,7 @@ class BMDLibrary:
             return None
         try:
             if path not in self._cache:
-                self._cache[path] = load_bmd_model(path)
+                self._cache[path] = load_bmd_model(path, self.material_library)
             return self._cache[path]
         except Exception as exc:  # noqa: BLE001
             self._failures[str(path)] = str(exc)
@@ -1061,10 +1690,24 @@ class _TerrainBuffers:
         data: TerrainData,
         texture_library: TextureLibrary,
         overlay: str,
+        material_library: Optional[MaterialStateLibrary],
     ) -> None:
         detail = texture_library.detail_factor
         heights = _upsample_height_map(data.height, detail)
-        tile_flags = compute_tile_material_flags(data.mapping_layer1, data.mapping_layer2, data.mapping_alpha)
+        tile_flags = compute_tile_material_flags(
+            data.mapping_layer1,
+            data.mapping_layer2,
+            data.mapping_alpha,
+            texture_library,
+            material_library,
+        )
+        spacing = float(TERRAIN_SCALE) / max(1, detail)
+        normal_map = _compute_normal_map(heights, spacing)
+        shadow_mask = _compute_shadow_mask(
+            heights,
+            np.array([-0.35, -1.0, -0.45], dtype=np.float32),
+            spacing,
+        )
         if detail > 1:
             expanded_flags = np.repeat(np.repeat(tile_flags, detail, axis=0), detail, axis=1)
             expanded_flags = np.pad(expanded_flags, ((0, 1), (0, 1)), mode="edge")
@@ -1081,7 +1724,6 @@ class _TerrainBuffers:
         normals = np.zeros_like(positions)
         uvs = np.zeros((grid_size * grid_size, 2), dtype=np.float32)
         materials = np.zeros((grid_size * grid_size,), dtype=np.float32)
-        spacing = float(TERRAIN_SCALE) / max(1, detail)
         for y in range(grid_size):
             for x in range(grid_size):
                 idx = y * grid_size + x
@@ -1155,6 +1797,21 @@ class _TerrainBuffers:
         self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.texture.repeat_x = True
         self.texture.repeat_y = True
+        normal_pixels = np.clip((normal_map * 0.5) + 0.5, 0.0, 1.0)
+        normal_bytes = (normal_pixels * 255).astype(np.uint8).tobytes()
+        self.normal_texture = ctx.texture(
+            (normal_pixels.shape[1], normal_pixels.shape[0]), 3, normal_bytes
+        )
+        self.normal_texture.build_mipmaps()
+        self.normal_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self.normal_texture.repeat_x = True
+        self.normal_texture.repeat_y = True
+        shadow_pixels = np.clip(shadow_mask, 0.0, 1.0)
+        shadow_bytes = (shadow_pixels * 255).astype(np.uint8).tobytes()
+        self.shadow_texture = ctx.texture((shadow_pixels.shape[1], shadow_pixels.shape[0]), 1, shadow_bytes)
+        self.shadow_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.shadow_texture.repeat_x = True
+        self.shadow_texture.repeat_y = True
 
 
 class _BMDMeshRenderer:
@@ -1191,7 +1848,9 @@ class _BMDMeshRenderer:
             else None
         )
         self.material_flags = mesh.material_flags
+        self.material_state = mesh.material_state
         self.texture = None
+        self.normal_texture = None
         self.bone_indices = (
             mesh.bone_indices.astype(np.int32, copy=True) if mesh.bone_indices is not None else None
         )
@@ -1213,6 +1872,20 @@ class _BMDMeshRenderer:
                 self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
                 self.texture.repeat_x = True
                 self.texture.repeat_y = True
+        if texture_loader is not None and mesh.material_state.normal_map:
+            image = texture_loader(mesh.material_state.normal_map)
+            if image is not None:
+                normal = image.astype(np.uint8)
+                if normal.ndim == 2:
+                    normal = np.stack([normal, normal, normal], axis=-1)
+                if normal.shape[2] > 3:
+                    normal = normal[..., :3]
+                h_px, w_px = normal.shape[:2]
+                self.normal_texture = ctx.texture((w_px, h_px), 3, normal.tobytes())
+                self.normal_texture.build_mipmaps()
+                self.normal_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+                self.normal_texture.repeat_x = True
+                self.normal_texture.repeat_y = True
 
     def update_pose(self, bone_matrices: Sequence[np.ndarray]) -> None:
         if not self.has_skinning or not bone_matrices:
@@ -1238,6 +1911,30 @@ class _BMDMeshRenderer:
         )
         self.vbo.write(vertex_data.astype("f4").tobytes())
 
+    def apply_state(self, ctx: "moderngl.Context") -> None:
+        if moderngl is None:
+            return
+        state = self.material_state
+        if state.transparent or state.additive:
+            ctx.enable(moderngl.BLEND)
+            try:
+                src = _blend_factor(state.src_blend)
+                dst = _blend_factor(state.dst_blend if not state.additive else "one")
+            except RuntimeError:
+                src, dst = moderngl.SRC_ALPHA, moderngl.ONE
+            ctx.blend_func = (src, dst)
+        else:
+            ctx.disable(moderngl.BLEND)
+        ctx.depth_mask = state.depth_write
+        if state.depth_test:
+            ctx.enable(moderngl.DEPTH_TEST)
+        else:
+            ctx.disable(moderngl.DEPTH_TEST)
+        if state.double_sided:
+            ctx.disable(moderngl.CULL_FACE)
+        else:
+            ctx.enable(moderngl.CULL_FACE)
+
 
 class BMDAnimationPlayer:
     def __init__(self, model: BMDModel, *, loop: bool = True) -> None:
@@ -1247,11 +1944,23 @@ class BMDAnimationPlayer:
         self.current_time = 0.0
         self._pose_cache: List[np.ndarray] = []
         self._dirty = True
+        self._next_animation: Optional[BMDAnimation] = None
+        self._next_time = 0.0
+        self._blend_elapsed = 0.0
+        self._blend_duration = 0.0
+        self._event_queue: deque[BMDAnimationEvent] = deque()
+        self._global_cache: List[np.ndarray] = []
         if model.animations:
             first = next(iter(model.animations))
             self.set_animation(first)
 
-    def set_animation(self, name: Optional[str]) -> None:
+    def set_animation(
+        self,
+        name: Optional[str],
+        *,
+        blend_time: Optional[float] = None,
+        restart: bool = True,
+    ) -> None:
         if not name:
             self.active = None
             self.current_time = 0.0
@@ -1259,24 +1968,88 @@ class BMDAnimationPlayer:
             return
         if name not in self.model.animations:
             return
-        self.active = self.model.animations[name]
-        self.current_time = 0.0
+        target = self.model.animations[name]
+        blend_duration = target.default_blend if blend_time is None else blend_time
+        if self.active is None or blend_duration <= 0.0:
+            self.active = target
+            if restart:
+                self.current_time = 0.0
+            self._next_animation = None
+            self._blend_elapsed = 0.0
+            self._blend_duration = 0.0
+        else:
+            if self.active is target and not restart:
+                return
+            self._next_animation = target
+            self._next_time = 0.0
+            self._blend_elapsed = 0.0
+            self._blend_duration = max(0.0, blend_duration)
+            if restart:
+                self._next_time = 0.0
+        if restart:
+            self.current_time = 0.0
         self._dirty = True
+
+    def _emit_events_interval(
+        self,
+        animation: BMDAnimation,
+        start: float,
+        end: float,
+    ) -> None:
+        if not animation.events:
+            return
+        if end < start:
+            start, end = end, start
+        for event in animation.events:
+            if start < event.time <= end:
+                self._event_queue.append(event)
 
     def update(self, delta: float) -> None:
         if self.active is None:
             return
-        if self.active.duration > 0.0:
-            self.current_time += delta
-            if self.loop:
-                self.current_time = math.fmod(self.current_time, self.active.duration)
-                if self.current_time < 0.0:
-                    self.current_time += self.active.duration
+        duration = self.active.duration
+        prev_time = self.current_time
+        if duration > 0.0:
+            total = prev_time + delta
+            if self.loop and duration > 0.0:
+                wraps = int(total // duration)
+                new_time = total % duration
+                if wraps == 0:
+                    self._emit_events_interval(self.active, prev_time, new_time)
+                else:
+                    self._emit_events_interval(self.active, prev_time, duration)
+                    for _ in range(max(0, wraps - 1)):
+                        self._emit_events_interval(self.active, 0.0, duration)
+                    self._emit_events_interval(self.active, 0.0, new_time)
+                self.current_time = new_time
             else:
-                self.current_time = min(self.current_time, self.active.duration)
+                new_time = min(total, duration)
+                self._emit_events_interval(self.active, prev_time, new_time)
+                self.current_time = new_time
         else:
             self.current_time = 0.0
+
+        if self._next_animation is not None:
+            self._next_time += delta
+            next_duration = self._next_animation.duration
+            if next_duration > 0.0 and self.loop:
+                self._next_time = math.fmod(self._next_time, next_duration)
+            self._blend_elapsed += delta
+            if self._blend_duration <= 0.0 or self._blend_elapsed >= self._blend_duration:
+                self.active = self._next_animation
+                self.current_time = self._next_time
+                self._next_animation = None
+                self._next_time = 0.0
+                self._blend_elapsed = 0.0
+                self._blend_duration = 0.0
+        elif self._blend_duration > 0.0 and self._blend_elapsed > 0.0:
+            self._blend_elapsed = min(self._blend_elapsed + delta, self._blend_duration)
         self._dirty = True
+
+    def consume_events(self) -> List[BMDAnimationEvent]:
+        events = list(self._event_queue)
+        self._event_queue.clear()
+        return events
 
     def pose_matrices(self) -> List[np.ndarray]:
         if not self._dirty and self._pose_cache:
@@ -1288,17 +2061,38 @@ class BMDAnimationPlayer:
         animation = self.active
         if animation is None or not animation.channels:
             pose = [bone.rest_matrix.astype(np.float32) for bone in self.model.bones]
+            self._global_cache = pose
             self._pose_cache = [pose_matrix @ bone.inverse_bind_matrix for pose_matrix, bone in zip(pose, self.model.bones)]
             self._dirty = False
             return self._pose_cache
 
+        blend_factor = 0.0
+        next_animation = self._next_animation
+        next_time = self._next_time
+        if next_animation is not None and self._blend_duration > 0.0:
+            blend_factor = min(self._blend_elapsed / max(self._blend_duration, 1e-5), 1.0)
+
         local_matrices: List[np.ndarray] = []
         for index, bone in enumerate(self.model.bones):
             if index in animation.channels:
-                translation, rotation = self._sample_channel(animation.channels[index], animation)
+                trans_a, quat_a = self._sample_channel(
+                    animation.channels[index], animation, self.current_time
+                )
             else:
-                translation, rotation = bone.rest_translation, bone.rest_rotation
-            local_matrices.append(_compose_transform_matrix(translation, rotation))
+                trans_a, quat_a = bone.rest_translation, bone.rest_quaternion
+
+            if blend_factor > 0.0 and next_animation is not None:
+                if index in next_animation.channels:
+                    trans_b, quat_b = self._sample_channel(
+                        next_animation.channels[index], next_animation, next_time
+                    )
+                else:
+                    trans_b, quat_b = bone.rest_translation, bone.rest_quaternion
+                translation = _lerp_vec(trans_a, trans_b, blend_factor)
+                quaternion = _quat_slerp(quat_a, quat_b, blend_factor)
+            else:
+                translation, quaternion = trans_a, quat_a
+            local_matrices.append(_compose_transform_quaternion(translation, quaternion))
 
         global_matrices: List[np.ndarray] = []
         skinning: List[np.ndarray] = []
@@ -1311,21 +2105,29 @@ class BMDAnimationPlayer:
             global_matrices.append(global_matrix)
             skinning.append(global_matrix @ self.model.bones[idx].inverse_bind_matrix)
 
+        self._global_cache = [matrix.astype(np.float32) for matrix in global_matrices]
         self._pose_cache = [matrix.astype(np.float32) for matrix in skinning]
         self._dirty = False
         return self._pose_cache
 
+    def global_matrices(self) -> List[np.ndarray]:
+        if self._global_cache:
+            return [matrix.copy() for matrix in self._global_cache]
+        return [bone.rest_matrix.astype(np.float32) for bone in self.model.bones]
+
     def _sample_channel(
-        self, channel: BMDAnimationChannel, animation: BMDAnimation
+        self,
+        channel: BMDAnimationChannel,
+        animation: BMDAnimation,
+        time_value: float,
     ) -> Tuple[np.ndarray, np.ndarray]:
         if not channel.keyframes:
             zero = np.zeros(3, dtype=np.float32)
-            return zero, zero
+            return zero, np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         if len(channel.keyframes) == 1:
             frame = channel.keyframes[0]
-            return frame.translation, frame.rotation
+            return frame.translation, frame.rotation_quat
         duration = max(animation.duration, channel.keyframes[-1].time)
-        time_value = self.current_time
         if duration > 0.0 and self.loop:
             cycles = time_value / duration
             frac = cycles - math.floor(cycles)
@@ -1335,13 +2137,14 @@ class BMDAnimationPlayer:
             if time_value <= frame.time:
                 span = frame.time - prev.time
                 if span <= 0.0:
-                    return frame.translation, frame.rotation
+                    return frame.translation, frame.rotation_quat
                 t = (time_value - prev.time) / span
                 translation = _lerp_vec(prev.translation, frame.translation, t)
-                rotation = _lerp_vec(prev.rotation, frame.rotation, t)
-                return translation, rotation
+                quaternion = _quat_slerp(prev.rotation_quat, frame.rotation_quat, t)
+                return translation, quaternion
             prev = frame
-        return channel.keyframes[-1].translation, channel.keyframes[-1].rotation
+        last = channel.keyframes[-1]
+        return last.translation, last.rotation_quat
 
 
 @dataclass
@@ -1349,6 +2152,10 @@ class BMDInstance:
     model_matrix: np.ndarray
     mesh_renderers: List[_BMDMeshRenderer]
     animation_player: Optional[BMDAnimationPlayer] = None
+    attachments: List[BMDHardpoint] = field(default_factory=list)
+    billboards: List[BMDHardpoint] = field(default_factory=list)
+    pose_matrices: List[np.ndarray] = field(default_factory=list)
+    global_matrices: List[np.ndarray] = field(default_factory=list)
 
 
 class OpenGLTerrainApp:
@@ -1358,6 +2165,7 @@ class OpenGLTerrainApp:
         objects: Sequence[TerrainObject],
         *,
         texture_library: TextureLibrary,
+        material_library: Optional[MaterialStateLibrary],
         bmd_library: Optional[BMDLibrary],
         overlay: str,
         title: str,
@@ -1367,6 +2175,7 @@ class OpenGLTerrainApp:
         self.data = data
         self.objects = list(objects)
         self.texture_library = texture_library
+        self.material_library = material_library
         self.bmd_library = bmd_library
         self.overlay = overlay
         self.title = title
@@ -1381,7 +2190,9 @@ class OpenGLTerrainApp:
         self.object_program: Optional["moderngl.Program"] = None
         self.object_specular_program: Optional["moderngl.Program"] = None
         self.sky_program: Optional["moderngl.Program"] = None
+        self.skybox_program: Optional["moderngl.Program"] = None
         self.particle_program: Optional["moderngl.Program"] = None
+        self.sky_texture: Optional["moderngl.Texture"] = None
         self.camera: Optional[OrbitCamera] = None
         self._pressed_keys: set[int] = set()
         self._start_time = 0.0
@@ -1391,6 +2202,14 @@ class OpenGLTerrainApp:
         self._particle_count = 0
         self._particle_vao: Optional["moderngl.VertexArray"] = None
         self.object_instances: List[BMDInstance] = []
+        self.directional_light_dir = np.array([-0.35, -1.0, -0.45], dtype=np.float32)
+        self.directional_light_color = np.array([1.0, 0.96, 0.88], dtype=np.float32)
+        self.shadow_strength = 0.65
+        self.static_point_lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        self.dynamic_point_lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        self.emissive_override = np.zeros(3, dtype=np.float32)
+        self._default_white_texture: Optional["moderngl.Texture"] = None
+        self._default_normal_texture: Optional["moderngl.Texture"] = None
 
     def _init_programs(self) -> None:
         assert self.ctx is not None
@@ -1419,101 +2238,114 @@ class OpenGLTerrainApp:
                 }
                 """
         )
-        self.terrain_program = self.ctx.program(
-            vertex_shader=terrain_vertex_shader,
-            fragment_shader=textwrap.dedent(
-                """
+        terrain_fragment_shader = textwrap.dedent(
+            """
                 #version 330
                 flat in int v_material;
                 in vec3 v_normal;
                 in vec3 v_world_pos;
                 in vec2 v_uv;
                 uniform sampler2D u_texture;
-                uniform vec3 u_light_dir;
+                uniform sampler2D u_normal_map;
+                uniform sampler2D u_shadow_map;
+                uniform vec3 u_dir_light_dir;
+                uniform vec3 u_dir_light_color;
+                uniform int u_point_light_count;
+                uniform vec3 u_point_light_pos[__MAX_POINT_LIGHTS__];
+                uniform vec3 u_point_light_color[__MAX_POINT_LIGHTS__];
+                uniform float u_point_light_range[__MAX_POINT_LIGHTS__];
                 uniform vec3 u_fog_color;
                 uniform float u_fog_density;
                 uniform float u_time;
                 uniform vec3 u_camera_pos;
+                uniform float u_shadow_strength;
+                uniform vec3 u_emissive_override;
                 out vec4 frag_color;
+                const int FLAG_WATER = 1;
+                const int FLAG_LAVA = 2;
+                const int FLAG_TRANSPARENT = 4;
+                const int FLAG_ADDITIVE = 8;
+                const int FLAG_EMISSIVE = 16;
+                const int FLAG_ALPHA_TEST = 32;
+                const int FLAG_DOUBLE_SIDED = 64;
+                const int FLAG_NO_SHADOW = 128;
+                const int FLAG_NORMAL_MAP = 256;
                 void main() {
                     vec2 uv = v_uv;
                     float wave = 0.0;
-                    if ((v_material & 1) != 0) {
-                        vec2 flow = vec2(sin(u_time * 0.35), cos(u_time * 0.4)) * 0.035;
+                    if ((v_material & FLAG_WATER) != 0) {
+                        vec2 flow = vec2(sin(u_time * 0.35), cos(u_time * 0.4)) * 0.03;
                         uv += flow;
                         wave += sin(u_time * 1.6 + v_world_pos.x * 0.002 + v_world_pos.z * 0.002) * 0.08;
                     }
-                    if ((v_material & 2) != 0) {
-                        float lava = sin(u_time * 2.0 + v_world_pos.x * 0.003) * 0.06;
+                    if ((v_material & FLAG_LAVA) != 0) {
+                        float lava = sin(u_time * 2.0 + v_world_pos.x * 0.003) * 0.07;
                         uv += vec2(0.0, lava);
                         wave += sin(u_time * 3.1 + v_world_pos.z * 0.004) * 0.12;
                     }
-                    vec4 color = texture(u_texture, uv);
+                    vec4 tex = texture(u_texture, uv);
+                    float alpha = tex.a;
+                    if ((v_material & FLAG_ALPHA_TEST) != 0 && alpha < 0.35) {
+                        discard;
+                    }
+                    vec3 base_color = tex.rgb;
+                    vec3 map_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
                     vec3 normal = normalize(v_normal);
                     if (wave != 0.0) {
-                        vec3 wave_normal = normalize(vec3(normal.x + wave, normal.y, normal.z + wave));
-                        normal = mix(normal, wave_normal, 0.6);
+                        normal = normalize(vec3(normal.x + wave, normal.y, normal.z + wave));
                     }
-                    float diff = max(dot(normal, normalize(-u_light_dir)), 0.0);
-                    vec3 ambient = color.rgb * 0.25;
-                    vec3 diffuse = color.rgb * diff * 0.75;
-                    vec3 lighting = ambient + diffuse;
-                    if ((v_material & 1) != 0) {
+                    float normal_mix = ((v_material & FLAG_NORMAL_MAP) != 0) ? 0.7 : 0.45;
+                    normal = normalize(mix(normal, map_normal, normal_mix));
+                    vec3 lighting = base_color * 0.22;
+                    vec3 dir = normalize(-u_dir_light_dir);
+                    float diff = max(dot(normal, dir), 0.0);
+                    float shadow = ((v_material & FLAG_NO_SHADOW) != 0) ? 1.0 : texture(u_shadow_map, v_uv).r;
+                    lighting += base_color * diff * u_dir_light_color * mix(1.0, shadow, u_shadow_strength);
+                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
+                    vec3 half_dir = normalize(dir + view_dir);
+                    float specular = pow(max(dot(normal, half_dir), 0.0), 30.0);
+                    lighting += base_color * specular * 0.18;
+                    for (int i = 0; i < u_point_light_count; ++i) {
+                        vec3 to_light = u_point_light_pos[i] - v_world_pos;
+                        float dist = length(to_light);
+                        float range = max(u_point_light_range[i], 0.001);
+                        float attenuation = clamp(1.0 - dist / range, 0.0, 1.0);
+                        vec3 light_dir = normalize(to_light);
+                        float ndotl = max(dot(normal, light_dir), 0.0);
+                        vec3 contrib = base_color * ndotl * u_point_light_color[i] * attenuation * attenuation;
+                        lighting += contrib;
+                        vec3 half_vec = normalize(light_dir + view_dir);
+                        float spec = pow(max(dot(normal, half_vec), 0.0), 28.0);
+                        lighting += u_point_light_color[i] * spec * 0.05;
+                    }
+                    if ((v_material & FLAG_WATER) != 0) {
                         lighting *= vec3(0.9, 1.05, 1.1);
                     }
-                    if ((v_material & 2) != 0) {
-                        lighting *= vec3(1.4, 0.7, 0.5);
+                    if ((v_material & FLAG_LAVA) != 0) {
+                        lighting *= vec3(1.4, 0.6, 0.4);
                     }
+                    if ((v_material & FLAG_EMISSIVE) != 0) {
+                        lighting += base_color * 0.6;
+                    }
+                    lighting += u_emissive_override;
                     float distance = length(v_world_pos - u_camera_pos);
                     float fog = clamp(exp(-u_fog_density * distance), 0.0, 1.0);
                     vec3 final_color = mix(u_fog_color, lighting, fog);
-                    frag_color = vec4(final_color, color.a);
+                    if ((v_material & FLAG_ADDITIVE) != 0) {
+                        final_color *= 1.2;
+                        alpha = 1.0;
+                    } else if ((v_material & FLAG_TRANSPARENT) == 0) {
+                        alpha = 1.0;
+                    }
+                    frag_color = vec4(final_color, alpha);
                 }
-                """
-            ),
-        )
-
-        self.terrain_specular_program = self.ctx.program(
+            """
+        ).replace("__MAX_POINT_LIGHTS__", str(MAX_POINT_LIGHTS))
+        self.terrain_program = self.ctx.program(
             vertex_shader=terrain_vertex_shader,
-            fragment_shader=textwrap.dedent(
-                """
-                #version 330
-                flat in int v_material;
-                in vec3 v_normal;
-                in vec3 v_world_pos;
-                in vec2 v_uv;
-                uniform sampler2D u_texture;
-                uniform vec3 u_light_dir;
-                uniform vec3 u_camera_pos;
-                uniform float u_time;
-                out vec4 frag_color;
-                void main() {
-                    vec2 uv = v_uv;
-                    if ((v_material & 1) != 0) {
-                        uv += vec2(sin(u_time * 0.5) * 0.025, cos(u_time * 0.45) * 0.02);
-                    }
-                    if ((v_material & 2) != 0) {
-                        uv += vec2(0.0, sin(u_time * 2.2 + v_world_pos.x * 0.004) * 0.08);
-                    }
-                    vec3 base = texture(u_texture, uv).rgb;
-                    vec3 normal = normalize(v_normal);
-                    vec3 light_dir = normalize(-u_light_dir);
-                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
-                    vec3 half_vec = normalize(light_dir + view_dir);
-                    float shininess = ((v_material & 1) != 0) ? 24.0 : 16.0;
-                    if ((v_material & 2) != 0) {
-                        shininess = 12.0;
-                    }
-                    float spec = pow(max(dot(normal, half_vec), 0.0), shininess);
-                    float boost = ((v_material & 1) != 0) ? 1.3 : 0.7;
-                    if ((v_material & 2) != 0) {
-                        boost = 1.6;
-                    }
-                    frag_color = vec4(base * spec * boost, 1.0);
-                }
-                """
-            ),
+            fragment_shader=terrain_fragment_shader,
         )
+        self.terrain_specular_program = None
 
         object_vertex_shader = textwrap.dedent(
             """
@@ -1535,100 +2367,110 @@ class OpenGLTerrainApp:
                     v_uv = in_uv;
                     gl_Position = u_projection * u_view * world_pos;
                 }
-            """
-        )
-        self.object_program = self.ctx.program(
-            vertex_shader=object_vertex_shader,
-            fragment_shader=textwrap.dedent(
                 """
+        )
+        object_fragment_shader = textwrap.dedent(
+            """
                 #version 330
                 in vec3 v_normal;
                 in vec3 v_world_pos;
                 in vec2 v_uv;
                 uniform sampler2D u_texture;
-                uniform vec3 u_light_dir;
+                uniform sampler2D u_normal_map;
+                uniform bool u_has_normal_map;
+                uniform vec3 u_dir_light_dir;
+                uniform vec3 u_dir_light_color;
+                uniform int u_point_light_count;
+                uniform vec3 u_point_light_pos[__MAX_POINT_LIGHTS__];
+                uniform vec3 u_point_light_color[__MAX_POINT_LIGHTS__];
+                uniform float u_point_light_range[__MAX_POINT_LIGHTS__];
                 uniform vec3 u_fog_color;
                 uniform float u_fog_density;
                 uniform vec3 u_camera_pos;
                 uniform float u_time;
                 uniform int u_material_flags;
+                uniform vec3 u_material_emissive;
+                uniform vec3 u_material_specular;
+                uniform float u_specular_power;
+                uniform float u_alpha_ref;
                 out vec4 frag_color;
+                const int FLAG_WATER = 1;
+                const int FLAG_LAVA = 2;
+                const int FLAG_TRANSPARENT = 4;
+                const int FLAG_ADDITIVE = 8;
+                const int FLAG_EMISSIVE = 16;
+                const int FLAG_ALPHA_TEST = 32;
+                const int FLAG_DOUBLE_SIDED = 64;
+                const int FLAG_NO_SHADOW = 128;
+                const int FLAG_NORMAL_MAP = 256;
                 void main() {
                     vec2 uv = v_uv;
-                    float wave = 0.0;
-                    if ((u_material_flags & 1) != 0) {
-                        vec2 flow = vec2(cos(u_time * 0.4), sin(u_time * 0.45)) * 0.035;
-                        uv += flow;
-                        wave += sin(u_time * 1.9 + v_world_pos.x * 0.003) * 0.09;
+                    if ((u_material_flags & FLAG_WATER) != 0) {
+                        uv += vec2(cos(u_time * 0.4), sin(u_time * 0.45)) * 0.03;
                     }
-                    if ((u_material_flags & 2) != 0) {
-                        float lava = sin(u_time * 2.5 + v_world_pos.x * 0.005) * 0.08;
-                        uv += vec2(0.0, lava);
-                        wave += sin(u_time * 3.5 + v_world_pos.z * 0.004) * 0.15;
+                    if ((u_material_flags & FLAG_LAVA) != 0) {
+                        uv += vec2(0.0, sin(u_time * 2.4 + v_world_pos.x * 0.006) * 0.08);
                     }
-                    vec4 color = texture(u_texture, uv);
-                    if ((u_material_flags & 4) != 0) {
-                        color.a = min(color.a + 0.2, 1.0);
+                    vec4 tex = texture(u_texture, uv);
+                    float alpha = tex.a;
+                    if ((u_material_flags & FLAG_ALPHA_TEST) != 0 && alpha < u_alpha_ref) {
+                        discard;
                     }
+                    vec3 base_color = tex.rgb;
                     vec3 normal = normalize(v_normal);
-                    if (wave != 0.0) {
-                        vec3 wave_normal = normalize(vec3(normal.x + wave, normal.y, normal.z + wave));
-                        normal = mix(normal, wave_normal, 0.6);
+                    if (u_has_normal_map) {
+                        vec3 map_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
+                        normal = normalize(map_normal);
                     }
-                    float diff = max(dot(normal, normalize(-u_light_dir)), 0.0);
-                    vec3 ambient = color.rgb * 0.28;
-                    vec3 diffuse = color.rgb * diff * 0.72;
-                    vec3 lighting = ambient + diffuse;
+                    vec3 lighting = base_color * 0.25;
+                    vec3 dir = normalize(-u_dir_light_dir);
+                    float diff = max(dot(normal, dir), 0.0);
+                    lighting += base_color * diff * u_dir_light_color;
+                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
+                    vec3 half_dir = normalize(dir + view_dir);
+                    float specular = pow(max(dot(normal, half_dir), 0.0), u_specular_power);
+                    lighting += u_material_specular * specular;
+                    for (int i = 0; i < u_point_light_count; ++i) {
+                        vec3 to_light = u_point_light_pos[i] - v_world_pos;
+                        float dist = length(to_light);
+                        float range = max(u_point_light_range[i], 0.001);
+                        float attenuation = clamp(1.0 - dist / range, 0.0, 1.0);
+                        vec3 light_dir = normalize(to_light);
+                        float ndotl = max(dot(normal, light_dir), 0.0);
+                        vec3 contrib = base_color * ndotl * u_point_light_color[i] * attenuation * attenuation;
+                        lighting += contrib;
+                        vec3 half_vec = normalize(light_dir + view_dir);
+                        float spec = pow(max(dot(normal, half_vec), 0.0), u_specular_power);
+                        lighting += u_material_specular * spec * attenuation;
+                    }
+                    if ((u_material_flags & FLAG_EMISSIVE) != 0) {
+                        lighting += base_color * 0.6;
+                    }
+                    lighting += u_material_emissive;
+                    if ((u_material_flags & FLAG_WATER) != 0) {
+                        lighting *= vec3(0.9, 1.05, 1.1);
+                    }
+                    if ((u_material_flags & FLAG_LAVA) != 0) {
+                        lighting *= vec3(1.4, 0.7, 0.5);
+                    }
                     float distance = length(v_world_pos - u_camera_pos);
                     float fog = clamp(exp(-u_fog_density * distance), 0.0, 1.0);
                     vec3 final_color = mix(u_fog_color, lighting, fog);
-                    frag_color = vec4(final_color, color.a);
+                    if ((u_material_flags & FLAG_ADDITIVE) != 0) {
+                        final_color *= 1.2;
+                        alpha = 1.0;
+                    } else if ((u_material_flags & FLAG_TRANSPARENT) == 0) {
+                        alpha = 1.0;
+                    }
+                    frag_color = vec4(final_color, clamp(alpha, 0.0, 1.0));
                 }
-                """
-            ),
-        )
-
-        self.object_specular_program = self.ctx.program(
+            """
+        ).replace("__MAX_POINT_LIGHTS__", str(MAX_POINT_LIGHTS))
+        self.object_program = self.ctx.program(
             vertex_shader=object_vertex_shader,
-            fragment_shader=textwrap.dedent(
-                """
-                #version 330
-                in vec3 v_normal;
-                in vec3 v_world_pos;
-                in vec2 v_uv;
-                uniform sampler2D u_texture;
-                uniform vec3 u_light_dir;
-                uniform vec3 u_camera_pos;
-                uniform float u_time;
-                uniform int u_material_flags;
-                out vec4 frag_color;
-                void main() {
-                    vec2 uv = v_uv;
-                    if ((u_material_flags & 1) != 0) {
-                        uv += vec2(sin(u_time * 0.5) * 0.03, cos(u_time * 0.55) * 0.03);
-                    }
-                    if ((u_material_flags & 2) != 0) {
-                        uv += vec2(0.0, sin(u_time * 2.4 + v_world_pos.x * 0.006) * 0.08);
-                    }
-                    vec3 base = texture(u_texture, uv).rgb;
-                    vec3 normal = normalize(v_normal);
-                    vec3 light_dir = normalize(-u_light_dir);
-                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
-                    vec3 half_vec = normalize(light_dir + view_dir);
-                    float shininess = ((u_material_flags & 1) != 0) ? 30.0 : 22.0;
-                    if ((u_material_flags & 2) != 0) {
-                        shininess = 14.0;
-                    }
-                    float spec = pow(max(dot(normal, half_vec), 0.0), shininess);
-                    float boost = ((u_material_flags & 1) != 0) ? 1.5 : 0.8;
-                    if ((u_material_flags & 2) != 0) {
-                        boost = 1.9;
-                    }
-                    frag_color = vec4(base * spec * boost, 1.0);
-                }
-                """
-            ),
+            fragment_shader=object_fragment_shader,
         )
+        self.object_specular_program = None
 
         self.sky_program = self.ctx.program(
             vertex_shader=textwrap.dedent(
@@ -1653,6 +2495,33 @@ class OpenGLTerrainApp:
                     float t = clamp((v_pos.y + 1.0) * 0.5, 0.0, 1.0);
                     vec3 color = mix(u_color_bottom, u_color_top, pow(t, 1.6));
                     frag_color = vec4(color, 1.0);
+                }
+                """
+            ),
+        )
+
+        self.skybox_program = self.ctx.program(
+            vertex_shader=textwrap.dedent(
+                """
+                #version 330
+                out vec2 v_uv;
+                const vec2 positions[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                void main() {
+                    vec2 pos = positions[gl_VertexID];
+                    v_uv = pos * 0.5 + 0.5;
+                    gl_Position = vec4(pos, 0.999, 1.0);
+                }
+                """
+            ),
+            fragment_shader=textwrap.dedent(
+                """
+                #version 330
+                in vec2 v_uv;
+                uniform sampler2D u_sky;
+                out vec4 frag_color;
+                void main() {
+                    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+                    frag_color = texture(u_sky, uv);
                 }
                 """
             ),
@@ -1696,23 +2565,172 @@ class OpenGLTerrainApp:
 
     def _build_particles(self) -> None:
         assert self.ctx is not None
-        count = 400
-        width = (TERRAIN_SIZE - 1) * TERRAIN_SCALE
-        rng = np.random.default_rng(42)
+        if self._particle_vbo is not None:
+            try:
+                self._particle_vbo.release()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._particle_vao is not None:
+            try:
+                self._particle_vao.release()
+            except Exception:  # noqa: BLE001
+                pass
+        self._particle_vbo = None
+        self._particle_vao = None
+        self._particle_count = 0
+        self._update_dynamic_particles(0.0)
+
+    def _infer_light_color(self, state: MaterialState) -> np.ndarray:
+        color = np.array(state.emissive, dtype=np.float32)
+        if float(np.linalg.norm(color)) < 1e-3:
+            if state.water:
+                color += np.array([0.12, 0.18, 0.35], dtype=np.float32)
+            if state.lava:
+                color += np.array([1.0, 0.35, 0.12], dtype=np.float32)
+            if state.additive:
+                color += np.array([0.25, 0.25, 0.25], dtype=np.float32)
+        if float(np.linalg.norm(color)) < 1e-3:
+            return np.zeros(3, dtype=np.float32)
+        return np.clip(color, 0.0, 4.0)
+
+    def _build_static_lights(self) -> None:
+        lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            if not instance.mesh_renderers:
+                continue
+            accum = np.zeros(3, dtype=np.float32)
+            samples = 0
+            for mesh in instance.mesh_renderers:
+                color = self._infer_light_color(mesh.material_state)
+                if float(np.linalg.norm(color)) < 1e-3:
+                    continue
+                accum += color
+                samples += 1
+            if samples == 0:
+                continue
+            position = instance.model_matrix[:3, 3].astype(np.float32)
+            radius = 1600.0 + samples * 240.0
+            lights.append((position, accum / samples, radius))
+        self.static_point_lights = lights
+
+    def _collect_dynamic_lights(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            if not instance.attachments or not instance.global_matrices:
+                continue
+            bone_matrices = instance.global_matrices
+            model_matrix = instance.model_matrix
+            base_color = np.zeros(3, dtype=np.float32)
+            if instance.mesh_renderers:
+                for mesh in instance.mesh_renderers:
+                    base_color += self._infer_light_color(mesh.material_state)
+                if np.any(base_color):
+                    base_color /= max(len(instance.mesh_renderers), 1)
+            for attachment in instance.attachments:
+                if attachment.bone_index < 0 or attachment.bone_index >= len(bone_matrices):
+                    continue
+                name_lower = attachment.name.lower()
+                if not np.any(attachment.color) and "light" not in name_lower and "lamp" not in name_lower:
+                    continue
+                local = _compose_transform_quaternion(attachment.offset, attachment.rotation_quat)
+                world = model_matrix @ bone_matrices[attachment.bone_index] @ local
+                position = world[:3, 3].astype(np.float32)
+                color = attachment.color.astype(np.float32, copy=True)
+                if float(np.linalg.norm(color)) < 1e-3 and np.any(base_color):
+                    color = base_color.copy()
+                color = np.clip(color, 0.0, 6.0)
+                radius = float(max(attachment.radius, 400.0))
+                lights.append((position, color, radius))
+        return lights[:MAX_POINT_LIGHTS]
+
+    def _update_dynamic_particles(self, time_value: float) -> None:
+        if self.ctx is None or self.particle_program is None:
+            return
+        particles: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            if not instance.billboards or not instance.global_matrices:
+                continue
+            bone_matrices = instance.global_matrices
+            model_matrix = instance.model_matrix
+            for billboard in instance.billboards:
+                if billboard.bone_index < 0 or billboard.bone_index >= len(bone_matrices):
+                    continue
+                local = _compose_transform_quaternion(billboard.offset, billboard.rotation_quat)
+                world = model_matrix @ bone_matrices[billboard.bone_index] @ local
+                position = world[:3, 3].astype(np.float32)
+                velocity = billboard.velocity.astype(np.float32, copy=True)
+                particles.append((position, velocity, time_value))
+        if not particles:
+            self._particle_count = 0
+            return
+        count = len(particles)
         particle_data = np.zeros((count, 7), dtype=np.float32)
-        particle_data[:, 0] = rng.uniform(0.0, width, count)
-        particle_data[:, 2] = rng.uniform(0.0, width, count)
-        particle_data[:, 1] = rng.uniform(800.0, 2200.0, count)
-        particle_data[:, 3:6] = rng.uniform(-15.0, 15.0, (count, 3))
-        particle_data[:, 6] = rng.uniform(0.0, 12.0, count)
-        self._particle_vbo = self.ctx.buffer(particle_data.astype("f4").tobytes())
+        for idx, (position, velocity, birth) in enumerate(particles):
+            particle_data[idx, 0:3] = position
+            particle_data[idx, 3:6] = velocity
+            particle_data[idx, 6] = birth
+        buffer_bytes = particle_data.astype("f4").tobytes()
+        if self._particle_vbo is None or self._particle_vbo.size != len(buffer_bytes):
+            if self._particle_vbo is not None:
+                try:
+                    self._particle_vbo.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._particle_vbo = self.ctx.buffer(buffer_bytes)
+            self._particle_vao = self.ctx.vertex_array(
+                self.particle_program,
+                [
+                    (self._particle_vbo, "3f 3f 1f", "in_position", "in_velocity", "in_birth"),
+                ],
+            )
+        else:
+            self._particle_vbo.write(buffer_bytes)
         self._particle_count = count
-        self._particle_vao = self.ctx.vertex_array(
-            self.particle_program,
-            [
-                (self._particle_vbo, "3f 3f 1f", "in_position", "in_velocity", "in_birth"),
-            ],
-        )
+
+    def _find_sky_image(self) -> Optional[np.ndarray]:
+        search_roots = getattr(self.texture_library, "search_roots", [])
+        candidates: List[Path] = []
+        for root in search_roots:
+            if not root.exists():
+                continue
+            potential_dirs = [
+                root,
+                root / "Sky",
+                root / "sky",
+                root / "Texture",
+                root / "Texture" / "Sky",
+            ]
+            for directory in potential_dirs:
+                if not directory.exists() or not directory.is_dir():
+                    continue
+                for path in sorted(directory.iterdir()):
+                    if not path.is_file():
+                        continue
+                    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                        continue
+                    if "sky" in path.stem.lower():
+                        candidates.append(path)
+        for path in candidates:
+            image = _load_image_file(path)
+            if image is not None:
+                return image
+        return None
+
+    def _initialize_sky_texture(self) -> None:
+        if self.ctx is None:
+            return
+        image = self._find_sky_image()
+        if image is None:
+            self.sky_texture = None
+            return
+        rgba = _ensure_rgba(image)
+        height_px, width_px = rgba.shape[:2]
+        texture = self.ctx.texture((width_px, height_px), 4, rgba.tobytes())
+        texture.build_mipmaps()
+        texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        texture.repeat_x = True
+        texture.repeat_y = True
+        self.sky_texture = texture
 
     def _load_objects(self) -> List[BMDInstance]:
         assert self.ctx is not None
@@ -1742,13 +2760,19 @@ class OpenGLTerrainApp:
                 bone_matrices = animation_player.pose_matrices()
                 for renderer in render_meshes:
                     renderer.update_pose(bone_matrices)
-            instances.append(
-                BMDInstance(
-                    model_matrix=_compose_model_matrix(obj),
-                    mesh_renderers=render_meshes,
-                    animation_player=animation_player,
-                )
+            instance = BMDInstance(
+                model_matrix=_compose_model_matrix(obj),
+                mesh_renderers=render_meshes,
+                animation_player=animation_player,
+                attachments=list(model.attachments),
+                billboards=list(model.billboards),
             )
+            if animation_player:
+                instance.pose_matrices = bone_matrices
+                instance.global_matrices = animation_player.global_matrices()
+            elif model.bones:
+                instance.global_matrices = [bone.rest_matrix.astype(np.float32) for bone in model.bones]
+            instances.append(instance)
         return instances
 
     def _setup(self) -> None:
@@ -1770,6 +2794,16 @@ class OpenGLTerrainApp:
         )
         self.ctx = moderngl.create_context()
         self.ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+        white_pixel = bytes([255, 255, 255, 255])
+        self._default_white_texture = self.ctx.texture((1, 1), 4, white_pixel)
+        self._default_white_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._default_white_texture.repeat_x = False
+        self._default_white_texture.repeat_y = False
+        normal_pixel = bytes([127, 127, 255])
+        self._default_normal_texture = self.ctx.texture((1, 1), 3, normal_pixel)
+        self._default_normal_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._default_normal_texture.repeat_x = False
+        self._default_normal_texture.repeat_y = False
         self._init_programs()
         self.terrain = _TerrainBuffers(
             self.ctx,
@@ -1778,8 +2812,11 @@ class OpenGLTerrainApp:
             self.data,
             self.texture_library,
             self.overlay,
+            self.material_library,
         )
+        self._initialize_sky_texture()
         self.object_instances = self._load_objects()
+        self._build_static_lights()
         self._build_particles()
         center = np.array(
             [
@@ -1830,17 +2867,22 @@ class OpenGLTerrainApp:
         pyglet.clock.schedule_interval(_update, 1 / 60.0)
 
     def _render_sky(self, time_value: float) -> None:
-        assert self.ctx is not None and self.sky_program is not None
+        assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
-        cycle = (math.sin(time_value * 0.05) + 1.0) * 0.5
-        day_top = np.array([0.32, 0.45, 0.72], dtype=np.float32)
-        night_top = np.array([0.05, 0.08, 0.18], dtype=np.float32)
-        top = day_top * (1.0 - cycle) + night_top * cycle
-        bottom = self.fog_color * (0.7 + 0.3 * cycle)
-        self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
-        self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
         self.ctx.screen.use()
-        self.sky_program.run(vertices=3)
+        if self.sky_texture is not None and self.skybox_program is not None:
+            self.sky_texture.use(location=3)
+            self.skybox_program["u_sky"].value = 3
+            self.skybox_program.run(vertices=3)
+        if self.sky_program is not None:
+            cycle = (math.sin(time_value * 0.05) + 1.0) * 0.5
+            day_top = np.array([0.32, 0.45, 0.72], dtype=np.float32)
+            night_top = np.array([0.05, 0.08, 0.18], dtype=np.float32)
+            top = day_top * (1.0 - cycle) + night_top * cycle
+            bottom = self.fog_color * (0.7 + 0.3 * cycle)
+            self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
+            self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
+            self.sky_program.run(vertices=3)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
@@ -1878,8 +2920,26 @@ class OpenGLTerrainApp:
             if instance.animation_player is not None:
                 instance.animation_player.update(delta_time)
                 bone_matrices = instance.animation_player.pose_matrices()
+                instance.pose_matrices = bone_matrices
+                instance.global_matrices = instance.animation_player.global_matrices()
                 for renderer in instance.mesh_renderers:
                     renderer.update_pose(bone_matrices)
+            elif instance.mesh_renderers and instance.global_matrices:
+                pose = instance.global_matrices
+                for renderer in instance.mesh_renderers:
+                    renderer.update_pose(pose)
+        self.dynamic_point_lights = self._collect_dynamic_lights()
+        self._update_dynamic_particles(time_value)
+        point_lights = (self.dynamic_point_lights + self.static_point_lights)[:MAX_POINT_LIGHTS]
+        point_count = len(point_lights)
+        point_positions = np.zeros((MAX_POINT_LIGHTS, 3), dtype=np.float32)
+        point_colors = np.zeros((MAX_POINT_LIGHTS, 3), dtype=np.float32)
+        point_ranges = np.zeros((MAX_POINT_LIGHTS,), dtype=np.float32)
+        for idx, (position, color, radius) in enumerate(point_lights):
+            point_positions[idx] = position
+            point_colors[idx] = color
+            point_ranges[idx] = radius
+        dir_light = _normalize(self.directional_light_dir)
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.screen.clear(*self.fog_color.tolist(), 1.0)
         self._render_sky(time_value)
@@ -1887,6 +2947,10 @@ class OpenGLTerrainApp:
         terrain = self.terrain
         assert terrain is not None
         terrain.texture.use(location=0)
+        if terrain.normal_texture is not None:
+            terrain.normal_texture.use(location=1)
+        if terrain.shadow_texture is not None:
+            terrain.shadow_texture.use(location=2)
         model_identity = np.eye(4, dtype=np.float32)
         self.ctx.disable(moderngl.BLEND)
         self.ctx.enable(moderngl.DEPTH_TEST)
@@ -1894,62 +2958,65 @@ class OpenGLTerrainApp:
         self.terrain_program["u_view"].write(view.astype("f4").tobytes())
         self.terrain_program["u_projection"].write(projection.astype("f4").tobytes())
         self.terrain_program["u_texture"].value = 0
-        self.terrain_program["u_light_dir"].value = (-0.35, -1.0, -0.45)
+        if terrain.normal_texture is not None:
+            self.terrain_program["u_normal_map"].value = 1
+        if terrain.shadow_texture is not None:
+            self.terrain_program["u_shadow_map"].value = 2
+        self.terrain_program["u_dir_light_dir"].value = tuple(dir_light.tolist())
+        self.terrain_program["u_dir_light_color"].value = tuple(self.directional_light_color.tolist())
+        self.terrain_program["u_point_light_count"].value = point_count
+        self.terrain_program["u_point_light_pos"].write(point_positions.astype("f4").tobytes())
+        self.terrain_program["u_point_light_color"].write(point_colors.astype("f4").tobytes())
+        self.terrain_program["u_point_light_range"].write(point_ranges.astype("f4").tobytes())
         self.terrain_program["u_fog_color"].value = tuple(self.fog_color.tolist())
         self.terrain_program["u_fog_density"].value = self.fog_density
         self.terrain_program["u_time"].value = time_value
         self.terrain_program["u_camera_pos"].value = tuple(eye.tolist())
+        self.terrain_program["u_shadow_strength"].value = self.shadow_strength
+        self.terrain_program["u_emissive_override"].value = tuple(self.emissive_override.tolist())
         terrain.vao_diffuse.render()
-
-        if self.terrain_specular_program is not None and terrain.vao_specular is not None:
-            self.ctx.enable(moderngl.BLEND)
-            self.ctx.blend_func = moderngl.ONE, moderngl.ONE
-            self.terrain_specular_program["u_model"].write(model_identity.tobytes())
-            self.terrain_specular_program["u_view"].write(view.astype("f4").tobytes())
-            self.terrain_specular_program["u_projection"].write(projection.astype("f4").tobytes())
-            self.terrain_specular_program["u_texture"].value = 0
-            self.terrain_specular_program["u_light_dir"].value = (-0.35, -1.0, -0.45)
-            self.terrain_specular_program["u_camera_pos"].value = tuple(eye.tolist())
-            self.terrain_specular_program["u_time"].value = time_value
-            terrain.vao_specular.render()
-            self.ctx.disable(moderngl.BLEND)
 
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        self.object_program["u_view"].write(view.astype("f4").tobytes())
+        self.object_program["u_projection"].write(projection.astype("f4").tobytes())
+        self.object_program["u_dir_light_dir"].value = tuple(dir_light.tolist())
+        self.object_program["u_dir_light_color"].value = tuple(self.directional_light_color.tolist())
+        self.object_program["u_point_light_count"].value = point_count
+        self.object_program["u_point_light_pos"].write(point_positions.astype("f4").tobytes())
+        self.object_program["u_point_light_color"].write(point_colors.astype("f4").tobytes())
+        self.object_program["u_point_light_range"].write(point_ranges.astype("f4").tobytes())
+        self.object_program["u_fog_color"].value = tuple(self.fog_color.tolist())
+        self.object_program["u_fog_density"].value = self.fog_density
+        self.object_program["u_time"].value = time_value
+        self.object_program["u_camera_pos"].value = tuple(eye.tolist())
+        self.object_program["u_texture"].value = 0
+        self.object_program["u_normal_map"].value = 1
         for instance in self.object_instances:
-            model_bytes = instance.model_matrix.astype(np.float32).tobytes()
-            self.object_program["u_model"].write(model_bytes)
-            self.object_program["u_view"].write(view.astype("f4").tobytes())
-            self.object_program["u_projection"].write(projection.astype("f4").tobytes())
-            self.object_program["u_texture"].value = 0
-            self.object_program["u_light_dir"].value = (-0.35, -1.0, -0.45)
-            self.object_program["u_fog_color"].value = tuple(self.fog_color.tolist())
-            self.object_program["u_fog_density"].value = self.fog_density
-            self.object_program["u_time"].value = time_value
-            self.object_program["u_camera_pos"].value = tuple(eye.tolist())
+            self.object_program["u_model"].write(instance.model_matrix.astype(np.float32).tobytes())
             for mesh in instance.mesh_renderers:
-                if mesh.texture is not None:
-                    mesh.texture.use(location=0)
+                mesh.apply_state(self.ctx)
+                texture = mesh.texture or self._default_white_texture
+                normal_map = mesh.normal_texture or self._default_normal_texture
+                if texture is not None:
+                    texture.use(location=0)
+                if normal_map is not None:
+                    normal_map.use(location=1)
+                self.object_program["u_has_normal_map"].value = int(mesh.normal_texture is not None)
                 self.object_program["u_material_flags"].value = mesh.material_flags
+                emissive = np.clip(np.array(mesh.material_state.emissive, dtype=np.float32), 0.0, 4.0)
+                specular = np.array(mesh.material_state.specular, dtype=np.float32)
+                self.object_program["u_material_emissive"].value = tuple(emissive.tolist())
+                self.object_program["u_material_specular"].value = tuple(specular.tolist())
+                self.object_program["u_specular_power"].value = float(mesh.material_state.specular_power)
+                alpha_ref = float(mesh.material_state.alpha_ref if mesh.material_state.alpha_test else 0.0)
+                self.object_program["u_alpha_ref"].value = alpha_ref
                 mesh.vao_diffuse.render()
-            if self.object_specular_program is not None:
-                self.ctx.blend_func = moderngl.ONE, moderngl.ONE
-                self.object_specular_program["u_model"].write(model_bytes)
-                self.object_specular_program["u_view"].write(view.astype("f4").tobytes())
-                self.object_specular_program["u_projection"].write(projection.astype("f4").tobytes())
-                self.object_specular_program["u_texture"].value = 0
-                self.object_specular_program["u_light_dir"].value = (-0.35, -1.0, -0.45)
-                self.object_specular_program["u_camera_pos"].value = tuple(eye.tolist())
-                self.object_specular_program["u_time"].value = time_value
-                for mesh in instance.mesh_renderers:
-                    if mesh.vao_specular is None:
-                        continue
-                    if mesh.texture is not None:
-                        mesh.texture.use(location=0)
-                    self.object_specular_program["u_material_flags"].value = mesh.material_flags
-                    mesh.vao_specular.render()
-                self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         self.ctx.disable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        self.ctx.depth_mask = True
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.CULL_FACE)
 
         self._render_particles(view, projection, time_value)
 
@@ -2303,6 +3370,7 @@ def render_scene(
     view_mode: str = "3d",
     overlay: str = "textures",
     texture_library: Optional[TextureLibrary] = None,
+    material_library: Optional[MaterialStateLibrary] = None,
     renderer: str = "matplotlib",
     bmd_library: Optional[BMDLibrary] = None,
     fog_color: Optional[Tuple[float, float, float]] = None,
@@ -2345,6 +3413,7 @@ def render_scene(
             data,
             objects,
             texture_library=texture_library,
+            material_library=material_library,
             bmd_library=bmd_library,
             overlay=overlay,
             title=title or "Visualização OpenGL",
@@ -2412,6 +3481,24 @@ def render_scene(
             depthshade=False,
             picker=True,
             pickradius=5,
+        )
+
+        if enable_object_edit and show:
+            editor = ObjectEditor(
+                fig,
+                ax,
+                scatter,
+                objects,
+                data.height,
+                camera_controls=True,
+            )
+            fig._terrain_object_editor = editor  # type: ignore[attr-defined]
+
+    if show:
+        fig._terrain_camera_navigator = CameraNavigator(  # type: ignore[attr-defined]
+            fig,
+            ax,
+            terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
         )
 
         if enable_object_edit and show:
@@ -3207,12 +4294,20 @@ def run_viewer(
 
     if render:
         texture_library: Optional[TextureLibrary] = None
+        material_library: Optional[MaterialStateLibrary] = None
         if renderer == "opengl":
             texture_library = TextureLibrary(
                 display_result.world_path,
                 detail_factor=max(1, texture_detail),
                 object_path=object_path,
             )
+            material_roots: List[Path] = []
+            if object_path:
+                material_roots.append(object_path)
+            guessed = guess_object_folder(world_path)
+            if guessed:
+                material_roots.append(guessed)
+            material_library = MaterialStateLibrary(display_result.world_path, extra_roots=material_roots)
         elif view_mode == "3d" and overlay == "textures":
             texture_library = TextureLibrary(
                 display_result.world_path,
@@ -3231,7 +4326,7 @@ def run_viewer(
             parent = world_path.parent
             if parent not in search_roots:
                 search_roots.append(parent)
-            bmd_library = BMDLibrary(search_roots)
+            bmd_library = BMDLibrary(search_roots, material_library=material_library)
 
         render_scene(
             display_result.data,
@@ -3243,6 +4338,7 @@ def run_viewer(
             view_mode=view_mode,
             overlay=overlay,
             texture_library=texture_library,
+            material_library=material_library,
             renderer=renderer,
             bmd_library=bmd_library,
             fog_density=fog_density,
@@ -3691,18 +4787,21 @@ class TerrainViewerGUI:
                         detail_factor=max(1, texture_detail),
                         object_path=object_dir,
                     )
+                material_library = None
                 bmd_library = None
                 if renderer == "opengl":
-                    search_roots: List[Path] = []
+                    material_roots: List[Path] = []
                     if object_dir:
-                        search_roots.append(object_dir)
+                        material_roots.append(object_dir)
                     guessed = guess_object_folder(world_path)
                     if guessed:
-                        search_roots.append(guessed)
+                        material_roots.append(guessed)
+                    material_library = MaterialStateLibrary(world_path, extra_roots=material_roots)
+                    search_roots: List[Path] = material_roots.copy()
                     parent = world_path.parent
                     if parent not in search_roots:
                         search_roots.append(parent)
-                    bmd_library = BMDLibrary(search_roots)
+                    bmd_library = BMDLibrary(search_roots, material_library=material_library)
                 render_scene(
                     self.last_result.data,
                     self.last_result.objects,
@@ -3713,6 +4812,7 @@ class TerrainViewerGUI:
                     view_mode=view_mode,
                     overlay=overlay,
                     texture_library=texture_library,
+                    material_library=material_library,
                     renderer=renderer,
                     bmd_library=bmd_library,
                     fog_density=fog_density,
