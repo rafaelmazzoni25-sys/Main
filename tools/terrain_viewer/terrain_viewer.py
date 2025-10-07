@@ -21,6 +21,10 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import tkinter as tk
+from matplotlib.axes import Axes
+from matplotlib.backend_bases import KeyEvent, PickEvent
+from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d.art3d import Path3DCollection
 from tkinter import filedialog, messagebox
 
 TERRAIN_SIZE = 256
@@ -345,6 +349,7 @@ def render_scene(
     show: bool,
     max_objects: Optional[int],
     title: Optional[str] = None,
+    enable_object_edit: bool = False,
 ) -> None:
     x = np.arange(TERRAIN_SIZE)
     y = np.arange(TERRAIN_SIZE)
@@ -369,6 +374,7 @@ def render_scene(
         shade=False,
     )
 
+    scatter: Optional[Path3DCollection] = None
     if objects:
         used_objects = objects[:max_objects] if max_objects is not None else objects
         ox = np.array([obj.tile_position[0] for obj in used_objects])
@@ -379,7 +385,33 @@ def render_scene(
             colors = (type_ids - type_ids.min()) / type_ids.ptp()
         else:
             colors = np.zeros_like(type_ids)
-        ax.scatter(ox, oy, oz + 50.0, c=colors, cmap="tab20", s=10, depthshade=False)
+        scatter = ax.scatter(
+            ox,
+            oy,
+            oz + 50.0,
+            c=colors,
+            cmap="tab20",
+            s=10,
+            depthshade=False,
+            picker=True,
+            pickradius=5,
+        )
+
+        if enable_object_edit and show:
+            if max_objects is not None:
+                print(
+                    "Aviso: edição habilitada com max_objects definido. Apenas"
+                    " os objetos carregados poderão ser movidos."
+                )
+            editor = ObjectEditor(
+                fig,
+                ax,
+                scatter,
+                used_objects,
+                data.height,
+            )
+            # Preserve referência para evitar coleta prematura.
+            fig._terrain_object_editor = editor  # type: ignore[attr-defined]
 
     ax.set_xlabel("X (tiles)")
     ax.set_ylabel("Y (tiles)")
@@ -397,6 +429,169 @@ def render_scene(
         plt.show()
     else:
         plt.close(fig)
+
+
+class ObjectEditor:
+    """Permite mover objetos renderizados usando eventos do Matplotlib."""
+
+    def __init__(
+        self,
+        fig: Figure,
+        ax: Axes,
+        scatter: Path3DCollection,
+        objects: Sequence[TerrainObject],
+        heights: np.ndarray,
+    ) -> None:
+        self.fig = fig
+        self.ax = ax
+        self.scatter = scatter
+        self.objects = list(objects)
+        self.heights = heights
+        self.selected_index: Optional[int] = None
+        self.step_tiles = 0.5
+
+        self.info_label = ax.text2D(
+            0.02,
+            0.02,
+            self._format_info_text(),
+            transform=ax.transAxes,
+            color="yellow",
+            fontsize=9,
+            ha="left",
+            va="bottom",
+            bbox={"facecolor": "black", "alpha": 0.6, "pad": 4},
+        )
+        self.selection_label = ax.text2D(
+            0.02,
+            0.94,
+            "",
+            transform=ax.transAxes,
+            color="cyan",
+            fontsize=10,
+            ha="left",
+            va="top",
+            bbox={"facecolor": "black", "alpha": 0.5, "pad": 4},
+        )
+        self.selection_label.set_visible(False)
+
+        canvas = fig.canvas
+        self.cid_pick = canvas.mpl_connect("pick_event", self.on_pick)
+        self.cid_key = canvas.mpl_connect("key_press_event", self.on_key_press)
+        self.cid_close = canvas.mpl_connect("close_event", self.on_close)
+
+        print(
+            "Edição habilitada: clique em um ponto para selecionar um objeto e use"
+            " as setas para mover. Shift acelera o passo. Use [ e ] para ajustar"
+            " o passo."
+        )
+
+    def _format_info_text(self) -> str:
+        return (
+            "Setas: mover objeto  |  Shift: x5  |  [: passo/2  |  ]: passo*2  "
+            f"| Passo atual: {self.step_tiles:.2f} tiles"
+        )
+
+    def on_pick(self, event: PickEvent) -> None:
+        if event.artist is not self.scatter:
+            return
+        indices = getattr(event, "ind", [])
+        if not indices:
+            return
+        index_array = np.atleast_1d(indices)
+        self.selected_index = int(index_array[0])
+        obj = self.objects[self.selected_index]
+        text = (
+            f"Selecionado #{self.selected_index} — ID {obj.type_id}"
+            f" ({obj.type_name or 'sem nome'})\n"
+            f"Tile: {obj.tile_position[0]:.2f}, {obj.tile_position[1]:.2f}"
+        )
+        self.selection_label.set_text(text)
+        self.selection_label.set_visible(True)
+        self.fig.canvas.draw_idle()
+
+    def on_key_press(self, event: KeyEvent) -> None:
+        if self.selected_index is None:
+            return
+        if not event.key:
+            return
+
+        parts = event.key.split("+")
+        key = parts[-1]
+        modifiers = set(parts[:-1])
+
+        if key == "escape":
+            self.selected_index = None
+            self.selection_label.set_visible(False)
+            self.fig.canvas.draw_idle()
+            return
+
+        if key == "]":
+            self.step_tiles = min(self.step_tiles * 2.0, 10.0)
+            self.info_label.set_text(self._format_info_text())
+            self.fig.canvas.draw_idle()
+            return
+
+        if key == "[":
+            self.step_tiles = max(self.step_tiles / 2.0, 0.03125)
+            self.info_label.set_text(self._format_info_text())
+            self.fig.canvas.draw_idle()
+            return
+
+        multiplier = 5.0 if "shift" in modifiers else 1.0
+        step = self.step_tiles * multiplier
+
+        delta_x = 0.0
+        delta_y = 0.0
+        if key == "up":
+            delta_y += step
+        elif key == "down":
+            delta_y -= step
+        elif key == "left":
+            delta_x -= step
+        elif key == "right":
+            delta_x += step
+        else:
+            return
+
+        self._move_selected(delta_x, delta_y)
+
+    def _move_selected(self, delta_x: float, delta_y: float) -> None:
+        if self.selected_index is None:
+            return
+        obj = self.objects[self.selected_index]
+        tile_x = obj.tile_position[0] + delta_x
+        tile_y = obj.tile_position[1] + delta_y
+        tile_x = float(np.clip(tile_x, 0.0, TERRAIN_SIZE - 1))
+        tile_y = float(np.clip(tile_y, 0.0, TERRAIN_SIZE - 1))
+        height = bilinear_height(self.heights, tile_x, tile_y)
+
+        obj.position = (
+            tile_x * TERRAIN_SCALE,
+            tile_y * TERRAIN_SCALE,
+            height,
+        )
+
+        ox, oy, oz = self.scatter._offsets3d
+        ox_arr = np.asarray(ox)
+        oy_arr = np.asarray(oy)
+        oz_arr = np.asarray(oz)
+        ox_arr[self.selected_index] = tile_x
+        oy_arr[self.selected_index] = tile_y
+        oz_arr[self.selected_index] = height + 50.0
+        self.scatter._offsets3d = (ox_arr, oy_arr, oz_arr)  # type: ignore[assignment]
+
+        self.selection_label.set_text(
+            f"Selecionado #{self.selected_index} — ID {obj.type_id}"
+            f" ({obj.type_name or 'sem nome'})\n"
+            f"Tile: {tile_x:.2f}, {tile_y:.2f}"
+        )
+        self.fig.canvas.draw_idle()
+
+    def on_close(self, _event: Optional[object]) -> None:
+        canvas = self.fig.canvas
+        canvas.mpl_disconnect(self.cid_pick)
+        canvas.mpl_disconnect(self.cid_key)
+        canvas.mpl_disconnect(self.cid_close)
 
 
 def find_first(pattern: str, directory: Path) -> Optional[Path]:
@@ -707,6 +902,7 @@ def run_viewer(
     summary_limit: int = 8,
     render: bool = True,
     export_objects: Optional[Path] = None,
+    enable_object_edit: bool = False,
 ) -> TerrainLoadResult:
     result = load_world_data(
         world_path,
@@ -717,6 +913,11 @@ def run_viewer(
         enum_path=enum_path,
     )
 
+    if enable_object_edit and not show:
+        raise ValueError(
+            "A edição de objetos requer a janela interativa. Remova --no-show para usar esta opção."
+        )
+
     if render:
         render_scene(
             result.data,
@@ -725,6 +926,7 @@ def run_viewer(
             show=show,
             max_objects=max_objects,
             title=f"{world_path.name} (mapa {result.map_id}) — {len(result.objects)} objetos",
+            enable_object_edit=enable_object_edit,
         )
 
     if export_objects is not None:
@@ -781,6 +983,7 @@ class TerrainViewerGUI:
         self.height_scale_var = tk.StringVar()
         self.max_objects_var = tk.StringVar()
         self.extended_height_var = tk.BooleanVar()
+        self.edit_objects_var = tk.BooleanVar()
 
         self.object_dir_var = tk.StringVar()
         self.status_var = tk.StringVar()
@@ -841,6 +1044,12 @@ class TerrainViewerGUI:
             text="Forçar TerrainHeightNew",
             variable=self.extended_height_var,
         ).grid(row=1, column=2, columnspan=2, sticky="w")
+
+        tk.Checkbutton(
+            options_frame,
+            text="Permitir mover objetos (janela interativa)",
+            variable=self.edit_objects_var,
+        ).grid(row=2, column=0, columnspan=4, sticky="w")
 
         buttons_frame = tk.Frame(self.root)
         buttons_frame.grid(row=2, column=0, sticky="e", **padding)
@@ -978,6 +1187,7 @@ class TerrainViewerGUI:
             detailed_summary=False,
             summary_limit=5,
             render=(render if render is not None else (show or output is not None)),
+            enable_object_edit=self.edit_objects_var.get(),
         )
         self.map_id_var.set(str(result.map_id))
         self.status_var.set(format_summary_line(result))
@@ -1037,6 +1247,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Salva um CSV com a lista completa de objetos posicionados no mapa.",
     )
     parser.add_argument(
+        "--edit-objects",
+        action="store_true",
+        help="Permite mover objetos na visualização interativa (setas do teclado).",
+    )
+    parser.add_argument(
         "--detailed-summary",
         action="store_true",
         help="Mostra estatísticas adicionais (altura, atributos e texturas).",
@@ -1068,6 +1283,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         detailed_summary=args.detailed_summary,
         summary_limit=args.summary_limit,
         render=not args.no_show or args.output is not None,
+        enable_object_edit=args.edit_objects,
     )
 
 

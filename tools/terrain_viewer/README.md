@@ -59,6 +59,9 @@ do zero e usa apenas ações comuns no Windows:
      correspondente quando encontrada.
    - Pressione **Visualizar** para carregar o mapa; a janela exibirá o terreno
      e uma lista dos objetos encontrados.
+   - Marque **Permitir mover objetos** para habilitar a edição direta na janela
+     do Matplotlib. Selecione um ponto com o mouse e use as setas para mover a
+     instância (Shift acelera o passo, `[` e `]` ajustam a distância percorrida).
    - Para gerar relatórios rápidos, utilize os botões **Resumo** (exibe
      estatísticas detalhadas) ou **Exportar objetos** (salva um CSV com a lista
      completa de instâncias do mapa).
@@ -137,6 +140,8 @@ em nomes legíveis.
   com milhares de instâncias).
 - `--object-path`: aponta diretamente para a pasta `ObjectX` quando os objetos
   não estão junto do `WorldX`.
+- `--edit-objects`: habilita a movimentação das instâncias exibidas (janela
+  interativa obrigatória, remova `--no-show`).
 - `--no-show`: evita abrir a janela interativa do Matplotlib.
 - `--output`: caminho do arquivo PNG de saída.
 - `--height-scale`: ajusta o fator aplicado ao formato clássico de altura (1.5
