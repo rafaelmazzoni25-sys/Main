@@ -1,11 +1,14 @@
 # Terrain viewer
 
 Este utilitário em Python recria parte do pipeline de carregamento do terreno
-(altura, atributos, mapeamento de texturas e objetos estáticos) e gera uma
-visualização interativa usando o Matplotlib. A partir desta versão o modo 3D
-renderiza os azulejos reais do cliente (com iluminação dinâmica), permitindo
-percorrer o mapa com os mesmos visuais vistos in-game sempre que as texturas
-`Tile*.jpg/.ozj/.ozt` estiverem presentes na pasta `WorldX`/`ObjectX`.
+(altura, atributos, mapeamento de texturas e objetos estáticos) e oferece uma
+visualização interativa com dois motores: o novo renderer OpenGL (via
+`moderngl`/`pyglet`), que reproduz os azulejos originais do cliente com
+iluminação dinâmica, névoa configurável e os modelos BMD posicionados no mapa;
+e um modo compatível com o Matplotlib para ambientes sem aceleração gráfica.
+Com o renderer OpenGL habilitado é possível percorrer o cenário com o mesmo
+visual visto in-game sempre que as texturas `Tile*.jpg/.ozj/.ozt` e os arquivos
+`Data/ObjectX/*.bmd` estiverem presentes.
 
 ## Pré-requisitos
 
@@ -15,8 +18,10 @@ O script depende de Python 3.9+ com as bibliotecas abaixo:
 pip install -r requirements.txt
 ```
 
-O arquivo `requirements.txt` na pasta contém as dependências mínimas (NumPy e
-Matplotlib).
+O arquivo `requirements.txt` na pasta contém as dependências mínimas (NumPy,
+Matplotlib, moderngl e pyglet). Em ambientes sem suporte a OpenGL você pode
+instalar apenas NumPy/Matplotlib e iniciar o visualizador com
+`--renderer matplotlib`.
 
 ## Guia rápido para iniciantes
 
@@ -70,6 +75,11 @@ do zero e usa apenas ações comuns no Windows:
    - Ajuste **Detalhe textura** para definir quantas subdivisões cada tile
      recebe quando o overlay está em **Texturas** (valores maiores exibem mais
      definição, porém exigem mais tempo de renderização).
+   - Escolha o **Renderer** entre *OpenGL* (visual mais próximo do cliente, com
+     texturas reais e modelos BMD) e *Matplotlib* (compatibilidade total em
+     ambientes sem aceleração gráfica).
+   - Configure **Névoa densidade** e **Cor névoa (R,G,B)** para alterar o clima
+     do renderer OpenGL; deixe em branco para usar os padrões sugeridos.
    - Marque **Permitir mover objetos** para habilitar a edição direta na janela
      do Matplotlib. Selecione um ponto com o mouse e use as setas para mover a
      instância (Shift acelera o passo, `[` e `]` ajustam a distância percorrida).
@@ -172,9 +182,13 @@ em nomes legíveis.
   (heatmap) com sobreposição plana.
 - `--overlay`: define o mapa de cores do terreno (texturas, altura ou
   atributos).
+- `--renderer`: seleciona o motor de visualização (*opengl* por padrão). Use
+  `--renderer matplotlib` para forçar o modo clássico.
 - `--texture-detail`: controla a densidade da malha quando o overlay está em
   texturas. Valores altos (4, 8...) deixam os azulejos mais nítidos às custas de
   maior tempo de renderização.
+- `--fog-density` / `--fog-color`: ajustam a névoa do renderer OpenGL; aceite
+  valores em floats (ex.: `--fog-color 0.25 0.33 0.45`).
 - `--filter` / `--exclude`: incluem ou ocultam objetos cujo ID ou nome contenha
   o texto informado (argumento pode ser repetido).
 - `--save-objects`: grava um novo arquivo `EncTerrainXX.obj` criptografado com

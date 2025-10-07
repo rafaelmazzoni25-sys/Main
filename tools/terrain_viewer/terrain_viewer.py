@@ -11,14 +11,17 @@ import ast
 import csv
 import functools
 import io
+import itertools
 import json
 import math
 import re
 import struct
-from collections import Counter
-from dataclasses import dataclass, replace
+import textwrap
+import time
+from collections import Counter, defaultdict, deque
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,6 +34,19 @@ from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Path3DCollection
 from PIL import Image
 from tkinter import filedialog, messagebox
+
+try:  # Optional OpenGL stack
+    import moderngl
+except Exception:  # noqa: BLE001
+    moderngl = None  # type: ignore[assignment]
+
+try:  # Optional windowing backend
+    import pyglet
+    from pyglet import gl as pyglet_gl  # noqa: F401  # used for type checking / side-effects
+    from pyglet.window import key as pyglet_key
+except Exception:  # noqa: BLE001
+    pyglet = None  # type: ignore[assignment]
+    pyglet_key = None  # type: ignore[assignment]
 
 TERRAIN_SIZE = 256
 TERRAIN_SCALE = 100.0
@@ -90,6 +106,14 @@ IMAGE_EXTENSIONS: Tuple[str, ...] = (
     ".tga",
     ".bmp",
 )
+
+WATER_TILE_IDS = {5, 44, 45, 46}
+LAVA_TILE_IDS = {11, 47}
+TRANSPARENT_TILE_IDS = {2, 3, 4, 5, 10, 11, 12, 44, 45, 46, 47}
+
+MATERIAL_WATER = 1 << 0
+MATERIAL_LAVA = 1 << 1
+MATERIAL_TRANSPARENT = 1 << 2
 
 
 def _eval_int_expression(expr: str, env: Mapping[str, int]) -> int:
@@ -213,6 +237,28 @@ class TerrainObject:
     @property
     def tile_position(self) -> Tuple[float, float]:
         return (self.position[0] / TERRAIN_SCALE, self.position[1] / TERRAIN_SCALE)
+
+
+@dataclass
+class BMDMesh:
+    name: str
+    positions: np.ndarray
+    normals: np.ndarray
+    texcoords: np.ndarray
+    indices: np.ndarray
+    texture_name: str
+    material_flags: int = 0
+
+
+@dataclass
+class BMDModel:
+    name: str
+    meshes: List[BMDMesh] = field(default_factory=list)
+    version: int = 0
+
+    @property
+    def has_transparency(self) -> bool:
+        return any(mesh.material_flags & MATERIAL_TRANSPARENT for mesh in self.meshes)
 
 
 @dataclass
@@ -468,6 +514,26 @@ class TextureLibrary:
         return sorted(self._missing)
 
 
+def compute_tile_material_flags(
+    layer1: np.ndarray, layer2: np.ndarray, alpha: np.ndarray
+) -> np.ndarray:
+    flags = np.zeros_like(layer1, dtype=np.uint32)
+    if layer1.size == 0:
+        return flags
+    for tile_ids, flag in ((WATER_TILE_IDS, MATERIAL_WATER), (LAVA_TILE_IDS, MATERIAL_LAVA)):
+        if tile_ids:
+            mask1 = np.isin(layer1, list(tile_ids))
+            mask2 = (alpha > 0.01) & np.isin(layer2, list(tile_ids))
+            flags[mask1] |= flag
+            flags[mask2] |= flag
+    if TRANSPARENT_TILE_IDS:
+        mask1 = np.isin(layer1, list(TRANSPARENT_TILE_IDS))
+        mask2 = (alpha > 0.01) & np.isin(layer2, list(TRANSPARENT_TILE_IDS))
+        flags[mask1] |= MATERIAL_TRANSPARENT
+        flags[mask2] |= MATERIAL_TRANSPARENT
+    return flags
+
+
 def map_file_decrypt(data: bytes) -> bytes:
     """Reproduz a rotina inline MapFileDecrypt do cliente."""
 
@@ -493,6 +559,859 @@ def map_file_encrypt(data: bytes) -> bytes:
         out[idx] = encrypted
         w_map_key = (encrypted + 0x3D) & 0xFF
     return bytes(out)
+
+
+def _sanitize_c_string(raw: bytes) -> str:
+    text = raw.split(b"\x00", 1)[0]
+    return text.decode("latin1", errors="ignore").strip()
+
+
+def _classify_mesh_material(texture_name: str) -> int:
+    lowered = texture_name.lower()
+    flags = 0
+    if any(token in lowered for token in ("water", "river", "wave", "ocean", "sea")):
+        flags |= MATERIAL_WATER | MATERIAL_TRANSPARENT
+    if any(token in lowered for token in ("lava", "magma", "volcano", "fire")):
+        flags |= MATERIAL_LAVA | MATERIAL_TRANSPARENT
+    if any(token in lowered for token in ("alpha", "glass", "trans", "smoke", "light", "flare")):
+        flags |= MATERIAL_TRANSPARENT
+    return flags
+
+
+def load_bmd_model(path: Path) -> BMDModel:
+    raw = _read_file(path)
+    if len(raw) < 7 or not raw.startswith(b"BMD"):
+        raise ValueError(f"Arquivo BMD inválido: {path}")
+
+    data = raw
+    ptr = 3
+    version = data[ptr]
+    ptr += 1
+    if version == 12:
+        if ptr + 4 > len(data):
+            raise ValueError(f"Cabeçalho corrompido em {path}")
+        enc_size = struct.unpack_from("<I", data, ptr)[0]
+        ptr += 4
+        encrypted = data[ptr : ptr + enc_size]
+        data = map_file_decrypt(encrypted)
+        ptr = 0
+    name = _sanitize_c_string(data[ptr : ptr + 32]) or path.stem
+    ptr += 32
+    if ptr + 6 > len(data):
+        raise ValueError(f"Arquivo BMD incompleto: {path}")
+    num_mesh, num_bones, num_actions = struct.unpack_from("<3H", data, ptr)
+    ptr += 6
+    meshes: List[BMDMesh] = []
+
+    try:
+        for mesh_index in range(num_mesh):
+            if ptr + 10 > len(data):
+                raise ValueError("Fim inesperado ao ler cabeçalho da malha")
+            num_vertices, num_normals, num_texcoords, num_triangles, _texture_idx = struct.unpack_from(
+                "<5H", data, ptr
+            )
+            ptr += 10
+
+            vertices: List[Tuple[float, float, float]] = []
+            for _ in range(num_vertices):
+                node, x, y, z = struct.unpack_from("<hxx3f", data, ptr)
+                _ = node  # compatível com estrutura original
+                vertices.append((x, y, z))
+                ptr += 16
+
+            for _ in range(num_normals):
+                _ = struct.unpack_from("<hxx3fh", data, ptr)
+                ptr += 18
+
+            texcoords_raw: List[Tuple[float, float]] = []
+            for _ in range(num_texcoords):
+                u, v = struct.unpack_from("<2f", data, ptr)
+                texcoords_raw.append((u, 1.0 - v))
+                ptr += 8
+
+            triangles: List[Tuple[int, Tuple[int, ...], Tuple[int, ...]]] = []
+            for _ in range(num_triangles):
+                polygon = struct.unpack_from("<b", data, ptr)[0]
+                vertex_idx = struct.unpack_from("<4h", data, ptr + 1)
+                tex_idx = struct.unpack_from("<4h", data, ptr + 17)
+                triangles.append((polygon, tuple(vertex_idx), tuple(tex_idx)))
+                ptr += 32
+
+            texture_name = _sanitize_c_string(data[ptr : ptr + 32])
+            ptr += 32
+
+            vertex_array = np.asarray(vertices, dtype=np.float32)
+            texcoord_array = np.asarray(texcoords_raw, dtype=np.float32)
+
+            mesh_vertices: List[Tuple[float, float, float]] = []
+            mesh_normals: List[Tuple[float, float, float]] = []
+            mesh_uvs: List[Tuple[float, float]] = []
+
+            def _safe_fetch(source: np.ndarray, index: int, fallback: Tuple[float, ...]) -> Tuple[float, ...]:
+                if 0 <= index < len(source):
+                    return tuple(source[index])  # type: ignore[return-value]
+                return fallback
+
+            for polygon, vert_idx, tex_idx in triangles:
+                corners = 4 if polygon == 4 else 3
+                base_indices = [0, 1, 2] if corners == 3 else [0, 1, 2, 3]
+                first = [base_indices[0], base_indices[1], base_indices[2]]
+                quads = []
+                if corners == 4:
+                    quads.append([base_indices[0], base_indices[2], base_indices[3]])
+
+                def _append_triangle(order: Sequence[int]) -> None:
+                    pts = []
+                    for offset in order:
+                        vid = vert_idx[offset]
+                        tex_id = tex_idx[offset]
+                        position = _safe_fetch(vertex_array, vid, (0.0, 0.0, 0.0))
+                        uv = _safe_fetch(texcoord_array, tex_id, (0.0, 0.0))
+                        pts.append((position, uv))
+                    v0, v1, v2 = (np.array(p[0], dtype=np.float32) for p in pts[:3])
+                    normal = np.cross(v1 - v0, v2 - v0)
+                    length = float(np.linalg.norm(normal))
+                    if length > 0.0:
+                        normal = normal / length
+                    else:
+                        normal = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+                    for position, uv in pts:
+                        mesh_vertices.append(position)
+                        mesh_normals.append(tuple(normal.tolist()))
+                        mesh_uvs.append(uv)
+
+                _append_triangle(first)
+                for quad in quads:
+                    _append_triangle(quad)
+
+            positions = np.asarray(mesh_vertices, dtype=np.float32)
+            normals = np.asarray(mesh_normals, dtype=np.float32)
+            uvs = np.asarray(mesh_uvs, dtype=np.float32)
+            indices = np.arange(len(positions), dtype=np.uint32)
+            meshes.append(
+                BMDMesh(
+                    name=f"{name}_mesh{mesh_index}",
+                    positions=positions,
+                    normals=normals,
+                    texcoords=uvs,
+                    indices=indices,
+                    texture_name=texture_name,
+                    material_flags=_classify_mesh_material(texture_name),
+                )
+            )
+
+        # Avance pelos blocos de animação para manter compatibilidade
+        action_key_counts: List[int] = []
+        for _ in range(num_actions):
+            if ptr + 3 > len(data):
+                break
+            keys = struct.unpack_from("<H", data, ptr)[0]
+            ptr += 2
+            lock_positions = struct.unpack_from("<?", data, ptr)[0]
+            ptr += 1
+            if lock_positions:
+                ptr += keys * 12
+            action_key_counts.append(keys)
+
+        for _ in range(num_bones):
+            if ptr >= len(data):
+                break
+            dummy = struct.unpack_from("<b", data, ptr)[0]
+            ptr += 1
+            if dummy:
+                continue
+            ptr += 32  # nome
+            ptr += 2  # parent
+            for keys in action_key_counts:
+                ptr += keys * 12  # posição
+                ptr += keys * 12  # rotação
+
+    except struct.error as exc:  # noqa: PERF203
+        raise ValueError(f"Falha ao decodificar {path}: {exc}") from exc
+
+    return BMDModel(name=name, meshes=meshes, version=version)
+
+
+class BMDLibrary:
+    def __init__(self, search_roots: Sequence[Path]) -> None:
+        unique_roots = []
+        for root in search_roots:
+            if root and root.exists() and root.is_dir():
+                resolved = root.resolve()
+                if resolved not in unique_roots:
+                    unique_roots.append(resolved)
+        self.search_roots = unique_roots
+        self._index: Dict[str, List[Path]] = defaultdict(list)
+        self._cache: Dict[Path, BMDModel] = {}
+        self._failures: Dict[str, str] = {}
+        self._build_index()
+
+    def _build_index(self) -> None:
+        for root in self.search_roots:
+            for path in root.rglob("*.bmd"):
+                lowered_name = path.stem.lower()
+                lowered_full = path.name.lower()
+                rel = path.relative_to(root).as_posix().lower()
+                self._index[lowered_name].append(path)
+                self._index[lowered_full].append(path)
+                self._index[rel].append(path)
+                parent = path.parent.name.lower()
+                if parent.startswith("object"):
+                    suffix = parent[len("object") :]
+                    self._index[f"object{suffix}_{lowered_name}"].append(path)
+                    digits = "".join(ch for ch in path.stem if ch.isdigit())
+                    if digits:
+                        self._index[f"object{suffix}_{digits}"].append(path)
+                        self._index[digits].append(path)
+
+    def _iter_candidates(self, obj: TerrainObject) -> Iterator[str]:
+        if obj.type_name:
+            lowered = obj.type_name.lower()
+            yield lowered
+            if lowered.startswith("model_"):
+                trimmed = lowered[len("model_") :]
+                yield trimmed
+                yield trimmed.replace("_", "")
+            yield lowered.replace("_", "")
+        yield str(obj.type_id)
+        yield f"object{obj.type_id}"
+        yield f"object{obj.type_id:02d}"
+
+    def resolve(self, obj: TerrainObject) -> Optional[Path]:
+        for key in self._iter_candidates(obj):
+            if key in self._index:
+                for path in self._index[key]:
+                    if path.exists():
+                        return path
+        return None
+
+    def load(self, obj: TerrainObject) -> Optional[BMDModel]:
+        path = self.resolve(obj)
+        if path is None:
+            return None
+        try:
+            if path not in self._cache:
+                self._cache[path] = load_bmd_model(path)
+            return self._cache[path]
+        except Exception as exc:  # noqa: BLE001
+            self._failures[str(path)] = str(exc)
+            return None
+
+    @property
+    def failures(self) -> Mapping[str, str]:
+        return dict(self._failures)
+
+    def load_texture_image(self, base_name: str) -> Optional[np.ndarray]:
+        if not base_name:
+            return None
+        for path in _iter_candidate_paths(self.search_roots, base_name, IMAGE_EXTENSIONS):
+            image = _load_image_file(path)
+            if image is not None:
+                return image
+        return None
+
+
+def _upsample_height_map(matrix: np.ndarray, factor: int) -> np.ndarray:
+    if factor <= 1:
+        return matrix.astype(np.float32)
+    height, width = matrix.shape
+    if height != width:
+        raise ValueError("Mapa de altura deve ser quadrado para upsampling uniforme.")
+    size = (height - 1) * factor + 1
+    src = np.arange(height, dtype=np.float32)
+    dst = np.linspace(0.0, float(height - 1), size, dtype=np.float32)
+    temp = np.empty((height, size), dtype=np.float32)
+    for idx in range(height):
+        temp[idx] = np.interp(dst, src, matrix[idx].astype(np.float32))
+    result = np.empty((size, size), dtype=np.float32)
+    for idx in range(size):
+        result[:, idx] = np.interp(dst, src, temp[:, idx])
+    return result
+
+
+def _compose_model_matrix(obj: TerrainObject) -> np.ndarray:
+    pitch, yaw, roll = (math.radians(angle) for angle in obj.angles)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cr, sr = math.cos(roll), math.sin(roll)
+    rx = np.array([[1, 0, 0], [0, cp, -sp], [0, sp, cp]], dtype=np.float32)
+    ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float32)
+    rz = np.array([[cr, -sr, 0], [sr, cr, 0], [0, 0, 1]], dtype=np.float32)
+    rotation = rz @ ry @ rx
+    scale = obj.scale if obj.scale > 0 else 1.0
+    model = np.eye(4, dtype=np.float32)
+    model[:3, :3] = rotation @ np.diag([scale, scale, scale])
+    model[:3, 3] = np.array(obj.position, dtype=np.float32)
+    return model
+
+
+class _TerrainBuffers:
+    def __init__(
+        self,
+        ctx: "moderngl.Context",
+        program: "moderngl.Program",
+        data: TerrainData,
+        texture_library: TextureLibrary,
+        overlay: str,
+    ) -> None:
+        detail = texture_library.detail_factor
+        heights = _upsample_height_map(data.height, detail)
+        tile_flags = compute_tile_material_flags(data.mapping_layer1, data.mapping_layer2, data.mapping_alpha)
+        if detail > 1:
+            expanded_flags = np.repeat(np.repeat(tile_flags, detail, axis=0), detail, axis=1)
+            expanded_flags = np.pad(expanded_flags, ((0, 1), (0, 1)), mode="edge")
+        else:
+            expanded_flags = tile_flags
+        grid_size = heights.shape[0]
+        axis_coords = np.linspace(
+            0.0,
+            float((TERRAIN_SIZE - 1) * TERRAIN_SCALE),
+            grid_size,
+            dtype=np.float32,
+        )
+        positions = np.zeros((grid_size * grid_size, 3), dtype=np.float32)
+        normals = np.zeros_like(positions)
+        uvs = np.zeros((grid_size * grid_size, 2), dtype=np.float32)
+        materials = np.zeros((grid_size * grid_size,), dtype=np.float32)
+        spacing = float(TERRAIN_SCALE) / max(1, detail)
+        for y in range(grid_size):
+            for x in range(grid_size):
+                idx = y * grid_size + x
+                x_world = axis_coords[x]
+                z_world = axis_coords[y]
+                positions[idx] = (x_world, heights[y, x], z_world)
+                uvs[idx] = (
+                    x / float(grid_size - 1 if grid_size > 1 else 1),
+                    y / float(grid_size - 1 if grid_size > 1 else 1),
+                )
+                materials[idx] = float(expanded_flags[min(y, expanded_flags.shape[0] - 1), min(x, expanded_flags.shape[1] - 1)])
+                left = heights[y, max(x - 1, 0)]
+                right = heights[y, min(x + 1, grid_size - 1)]
+                down = heights[max(y - 1, 0), x]
+                up = heights[min(y + 1, grid_size - 1), x]
+                dx = (left - right) / (2.0 * spacing)
+                dz = (down - up) / (2.0 * spacing)
+                normal = np.array([dx, 1.0, dz], dtype=np.float32)
+                normals[idx] = _normalize(normal)
+
+        indices: List[int] = []
+        for y in range(grid_size - 1):
+            for x in range(grid_size - 1):
+                i0 = y * grid_size + x
+                i1 = i0 + 1
+                i2 = i0 + grid_size
+                i3 = i2 + 1
+                indices.extend([i0, i2, i1, i1, i2, i3])
+
+        vertex_data = np.hstack([
+            positions,
+            normals,
+            uvs,
+            materials[:, None],
+        ]).astype("f4")
+        self.vbo = ctx.buffer(vertex_data.tobytes())
+        self.ibo = ctx.buffer(np.asarray(indices, dtype=np.uint32).tobytes())
+        self.vao = ctx.vertex_array(
+            program,
+            [
+                (self.vbo, "3f 3f 2f 1f", "in_position", "in_normal", "in_uv", "in_material"),
+            ],
+            self.ibo,
+        )
+
+        if overlay == "textures":
+            pixels = texture_library.compose_texture_pixels(
+                data.mapping_layer1, data.mapping_layer2, data.mapping_alpha
+            )
+        else:
+            matrix, cmap_name = _overlay_matrix(data, overlay)
+            cmap = plt.get_cmap(cmap_name)
+            normalized = _normalize_for_colormap(matrix)
+            pixels = cmap(normalized)
+        pixels = np.clip(pixels, 0.0, 1.0)
+        height_px, width_px = pixels.shape[:2]
+        texture_bytes = (pixels * 255).astype(np.uint8).tobytes()
+        self.texture = ctx.texture((width_px, height_px), 4, texture_bytes)
+        self.texture.build_mipmaps()
+        self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self.texture.repeat_x = True
+        self.texture.repeat_y = True
+
+
+class _BMDMeshRenderer:
+    def __init__(
+        self,
+        ctx: "moderngl.Context",
+        program: "moderngl.Program",
+        mesh: BMDMesh,
+        texture_loader: Optional[callable],
+    ) -> None:
+        vertices = np.hstack(
+            [
+                mesh.positions.astype("f4"),
+                mesh.normals.astype("f4"),
+                mesh.texcoords.astype("f4"),
+            ]
+        )
+        self.vbo = ctx.buffer(vertices.tobytes())
+        self.ibo = ctx.buffer(mesh.indices.astype(np.uint32).tobytes())
+        self.vao = ctx.vertex_array(
+            program,
+            [
+                (self.vbo, "3f 3f 2f", "in_position", "in_normal", "in_uv"),
+            ],
+            self.ibo,
+        )
+        self.material_flags = mesh.material_flags
+        self.texture = None
+        if texture_loader is not None and mesh.texture_name:
+            image = texture_loader(mesh.texture_name)
+            if image is not None:
+                rgba = image.astype(np.uint8)
+                if rgba.ndim == 2:
+                    rgba = np.stack([rgba, rgba, rgba, np.full_like(rgba, 255)], axis=-1)
+                elif rgba.shape[2] == 3:
+                    alpha = np.full((rgba.shape[0], rgba.shape[1], 1), 255, dtype=np.uint8)
+                    rgba = np.concatenate([rgba, alpha], axis=2)
+                height_px, width_px = rgba.shape[:2]
+                self.texture = ctx.texture((width_px, height_px), 4, rgba.tobytes())
+                self.texture.build_mipmaps()
+                self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+                self.texture.repeat_x = True
+                self.texture.repeat_y = True
+
+
+class OpenGLTerrainApp:
+    def __init__(
+        self,
+        data: TerrainData,
+        objects: Sequence[TerrainObject],
+        *,
+        texture_library: TextureLibrary,
+        bmd_library: Optional[BMDLibrary],
+        overlay: str,
+        title: str,
+        fog_color: Tuple[float, float, float] = (0.25, 0.33, 0.45),
+        fog_density: float = 0.00025,
+    ) -> None:
+        self.data = data
+        self.objects = list(objects)
+        self.texture_library = texture_library
+        self.bmd_library = bmd_library
+        self.overlay = overlay
+        self.title = title
+        self.fog_color = np.array(fog_color, dtype=np.float32)
+        self.fog_density = fog_density
+        self.window_size = (1280, 720)
+        self.ctx: Optional["moderngl.Context"] = None
+        self.window: Optional["pyglet.window.Window"] = None
+        self.terrain: Optional[_TerrainBuffers] = None
+        self.terrain_program: Optional["moderngl.Program"] = None
+        self.object_program: Optional["moderngl.Program"] = None
+        self.sky_program: Optional["moderngl.Program"] = None
+        self.particle_program: Optional["moderngl.Program"] = None
+        self.camera: Optional[OrbitCamera] = None
+        self._pressed_keys: set[int] = set()
+        self._start_time = 0.0
+        self._object_mesh_cache: Dict[str, List[_BMDMeshRenderer]] = {}
+        self._particle_vbo: Optional["moderngl.Buffer"] = None
+        self._particle_count = 0
+        self.object_instances: List[Tuple[np.ndarray, List[_BMDMeshRenderer]]] = []
+
+    def _init_programs(self) -> None:
+        assert self.ctx is not None
+        self.terrain_program = self.ctx.program(
+            vertex_shader=textwrap.dedent(
+                """
+                #version 330
+                in vec3 in_position;
+                in vec3 in_normal;
+                in vec2 in_uv;
+                in float in_material;
+                uniform mat4 u_model;
+                uniform mat4 u_view;
+                uniform mat4 u_projection;
+                flat out int v_material;
+                out vec3 v_normal;
+                out vec3 v_world_pos;
+                out vec2 v_uv;
+                void main() {
+                    vec4 world_pos = u_model * vec4(in_position, 1.0);
+                    v_world_pos = world_pos.xyz;
+                    mat3 normal_matrix = mat3(u_model);
+                    v_normal = normalize(normal_matrix * in_normal);
+                    v_uv = in_uv;
+                    v_material = int(in_material + 0.5);
+                    gl_Position = u_projection * u_view * world_pos;
+                }
+                """
+            ),
+            fragment_shader=textwrap.dedent(
+                """
+                #version 330
+                flat in int v_material;
+                in vec3 v_normal;
+                in vec3 v_world_pos;
+                in vec2 v_uv;
+                uniform sampler2D u_texture;
+                uniform vec3 u_light_dir;
+                uniform vec3 u_fog_color;
+                uniform float u_fog_density;
+                uniform float u_time;
+                uniform vec3 u_camera_pos;
+                out vec4 frag_color;
+                void main() {
+                    vec2 uv = v_uv;
+                    if ((v_material & 1) != 0) {
+                        uv += vec2(u_time * 0.03, 0.0);
+                    }
+                    if ((v_material & 2) != 0) {
+                        uv += vec2(0.0, sin(u_time * 0.7) * 0.02);
+                    }
+                    vec4 color = texture(u_texture, uv);
+                    vec3 normal = normalize(v_normal);
+                    float diff = max(dot(normal, normalize(-u_light_dir)), 0.0);
+                    vec3 lighting = color.rgb * (0.2 + 0.8 * diff);
+                    float distance = length(v_world_pos - u_camera_pos);
+                    float fog = clamp(exp(-u_fog_density * distance), 0.0, 1.0);
+                    vec3 final_color = mix(u_fog_color, lighting, fog);
+                    frag_color = vec4(final_color, color.a);
+                }
+                """
+            ),
+        )
+
+        self.object_program = self.ctx.program(
+            vertex_shader=textwrap.dedent(
+                """
+                #version 330
+                in vec3 in_position;
+                in vec3 in_normal;
+                in vec2 in_uv;
+                uniform mat4 u_model;
+                uniform mat4 u_view;
+                uniform mat4 u_projection;
+                out vec3 v_normal;
+                out vec3 v_world_pos;
+                out vec2 v_uv;
+                void main() {
+                    vec4 world_pos = u_model * vec4(in_position, 1.0);
+                    v_world_pos = world_pos.xyz;
+                    mat3 normal_matrix = mat3(u_model);
+                    v_normal = normalize(normal_matrix * in_normal);
+                    v_uv = in_uv;
+                    gl_Position = u_projection * u_view * world_pos;
+                }
+                """
+            ),
+            fragment_shader=textwrap.dedent(
+                """
+                #version 330
+                in vec3 v_normal;
+                in vec3 v_world_pos;
+                in vec2 v_uv;
+                uniform sampler2D u_texture;
+                uniform vec3 u_light_dir;
+                uniform vec3 u_fog_color;
+                uniform float u_fog_density;
+                uniform vec3 u_camera_pos;
+                uniform float u_time;
+                uniform int u_material_flags;
+                out vec4 frag_color;
+                void main() {
+                    vec2 uv = v_uv;
+                    if ((u_material_flags & 1) != 0) {
+                        uv += vec2(u_time * 0.05, 0.0);
+                    }
+                    if ((u_material_flags & 2) != 0) {
+                        uv += vec2(0.0, sin(u_time * 1.2) * 0.03);
+                    }
+                    vec4 color = texture(u_texture, uv);
+                    if ((u_material_flags & 4) != 0) {
+                        color.a = min(color.a + 0.2, 1.0);
+                    }
+                    vec3 normal = normalize(v_normal);
+                    float diff = max(dot(normal, normalize(-u_light_dir)), 0.0);
+                    vec3 lighting = color.rgb * (0.25 + 0.75 * diff);
+                    float distance = length(v_world_pos - u_camera_pos);
+                    float fog = clamp(exp(-u_fog_density * distance), 0.0, 1.0);
+                    vec3 final_color = mix(u_fog_color, lighting, fog);
+                    frag_color = vec4(final_color, color.a);
+                }
+                """
+            ),
+        )
+
+        self.sky_program = self.ctx.program(
+            vertex_shader=textwrap.dedent(
+                """
+                #version 330
+                out vec2 v_pos;
+                const vec2 positions[3] = vec2[](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+                void main() {
+                    v_pos = positions[gl_VertexID];
+                    gl_Position = vec4(v_pos, 0.999, 1.0);
+                }
+                """
+            ),
+            fragment_shader=textwrap.dedent(
+                """
+                #version 330
+                in vec2 v_pos;
+                uniform vec3 u_color_top;
+                uniform vec3 u_color_bottom;
+                out vec4 frag_color;
+                void main() {
+                    float t = clamp((v_pos.y + 1.0) * 0.5, 0.0, 1.0);
+                    vec3 color = mix(u_color_bottom, u_color_top, pow(t, 1.6));
+                    frag_color = vec4(color, 1.0);
+                }
+                """
+            ),
+        )
+
+        self.particle_program = self.ctx.program(
+            vertex_shader=textwrap.dedent(
+                """
+                #version 330
+                in vec3 in_position;
+                uniform mat4 u_view;
+                uniform mat4 u_projection;
+                uniform float u_time;
+                out float v_alpha;
+                void main() {
+                    vec3 pos = in_position;
+                    pos.y += sin(u_time * 0.5 + pos.x * 0.01) * 80.0;
+                    gl_Position = u_projection * u_view * vec4(pos, 1.0);
+                    gl_PointSize = 4.0;
+                    v_alpha = fract(sin(dot(pos.xy , vec2(12.9898,78.233))) * 43758.5453);
+                }
+                """
+            ),
+            fragment_shader=textwrap.dedent(
+                """
+                #version 330
+                in float v_alpha;
+                uniform vec3 u_fog_color;
+                out vec4 frag_color;
+                void main() {
+                    float dist = length(gl_PointCoord - vec2(0.5));
+                    float alpha = smoothstep(0.5, 0.0, dist) * (0.3 + v_alpha * 0.4);
+                    frag_color = vec4(u_fog_color, alpha);
+                }
+                """
+            ),
+        )
+
+    def _build_particles(self) -> None:
+        assert self.ctx is not None
+        count = 400
+        width = (TERRAIN_SIZE - 1) * TERRAIN_SCALE
+        rng = np.random.default_rng(42)
+        positions = np.zeros((count, 3), dtype=np.float32)
+        positions[:, 0] = rng.uniform(0.0, width, count)
+        positions[:, 2] = rng.uniform(0.0, width, count)
+        positions[:, 1] = rng.uniform(500.0, 2500.0, count)
+        self._particle_vbo = self.ctx.buffer(positions.astype("f4").tobytes())
+        self._particle_count = count
+
+    def _load_objects(self) -> List[Tuple[np.ndarray, List[_BMDMeshRenderer]]]:
+        assert self.ctx is not None
+        if self.bmd_library is None:
+            return []
+        instances: List[Tuple[np.ndarray, List[_BMDMeshRenderer]]] = []
+        for obj in self.objects:
+            model = self.bmd_library.load(obj)
+            if not model or not model.meshes:
+                continue
+            cache_key = model.name
+            if cache_key not in self._object_mesh_cache:
+                renderers: List[_BMDMeshRenderer] = []
+                for mesh in model.meshes:
+                    renderer = _BMDMeshRenderer(
+                        self.ctx,
+                        self.object_program,
+                        mesh,
+                        self.bmd_library.load_texture_image if self.bmd_library else None,
+                    )
+                    renderers.append(renderer)
+                self._object_mesh_cache[cache_key] = renderers
+            render_meshes = self._object_mesh_cache[cache_key]
+            instances.append((_compose_model_matrix(obj), render_meshes))
+        return instances
+
+    def _setup(self) -> None:
+        if moderngl is None or pyglet is None:
+            raise RuntimeError("O renderer OpenGL requer as dependências 'moderngl' e 'pyglet'.")
+        config = None
+        if pyglet:
+            try:
+                config = pyglet.gl.Config(sample_buffers=1, samples=4, depth_size=24, double_buffer=True)
+            except Exception:  # noqa: BLE001
+                config = None
+        self.window = pyglet.window.Window(
+            width=self.window_size[0],
+            height=self.window_size[1],
+            caption=self.title,
+            resizable=True,
+            config=config,
+            visible=False,
+        )
+        self.ctx = moderngl.create_context()
+        self.ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+        self._init_programs()
+        self.terrain = _TerrainBuffers(self.ctx, self.terrain_program, self.data, self.texture_library, self.overlay)
+        self.object_instances = self._load_objects()
+        self._build_particles()
+        center = np.array(
+            [
+                (TERRAIN_SIZE - 1) * TERRAIN_SCALE / 2.0,
+                float(np.max(self.data.height)) + 1000.0,
+                (TERRAIN_SIZE - 1) * TERRAIN_SCALE / 2.0,
+            ],
+            dtype=np.float32,
+        )
+        self.camera = OrbitCamera(center)
+        self._start_time = time.perf_counter()
+        self.window.set_visible(True)
+        self._bind_events()
+
+    def _bind_events(self) -> None:
+        assert self.window is not None
+
+        @self.window.event
+        def on_draw() -> None:  # noqa: ANN001
+            self.render_frame()
+
+        @self.window.event
+        def on_close() -> None:  # noqa: ANN001
+            pyglet.app.exit()
+
+        @self.window.event
+        def on_key_press(symbol: int, _modifiers: int) -> None:
+            if symbol == pyglet_key.ESCAPE:
+                pyglet.app.exit()
+                return
+            self._pressed_keys.add(symbol)
+
+        @self.window.event
+        def on_key_release(symbol: int, _modifiers: int) -> None:
+            if symbol in self._pressed_keys:
+                self._pressed_keys.remove(symbol)
+
+        @self.window.event
+        def on_mouse_scroll(_x: int, _y: int, _dx: float, dy: float) -> None:
+            if self.camera:
+                self.camera.zoom(-dy * 400.0)
+
+        def _update(dt: float) -> None:
+            if self.camera:
+                self.camera.update(self._pressed_keys, dt)
+
+        pyglet.clock.schedule_interval(_update, 1 / 60.0)
+
+    def _render_sky(self) -> None:
+        assert self.ctx is not None and self.sky_program is not None
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        top = np.clip(self.fog_color + 0.25, 0.0, 1.0)
+        self.sky_program["u_color_top"].value = tuple(top.tolist())
+        self.sky_program["u_color_bottom"].value = tuple(self.fog_color.tolist())
+        self.ctx.screen.use()
+        self.sky_program.run(vertices=3)
+        self.ctx.enable(moderngl.DEPTH_TEST)
+
+    def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
+        if self._particle_vbo is None or self._particle_count == 0:
+            return
+        assert self.ctx is not None and self.particle_program is not None
+        vao = self.ctx.vertex_array(
+            self.particle_program,
+            [(self._particle_vbo, "3f", "in_position")],
+        )
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        self.particle_program["u_view"].write(view.astype("f4").tobytes())
+        self.particle_program["u_projection"].write(projection.astype("f4").tobytes())
+        self.particle_program["u_time"].value = time_value
+        self.particle_program["u_fog_color"].value = tuple(self.fog_color.tolist())
+        vao.render(mode=moderngl.POINTS, vertices=self._particle_count)
+        self.ctx.disable(moderngl.BLEND)
+
+    def render_frame(self) -> None:
+        if self.ctx is None or self.camera is None or self.terrain_program is None or self.object_program is None:
+            return
+        time_value = time.perf_counter() - self._start_time
+        if self.window is not None:
+            width, height = self.window.get_framebuffer_size()
+        else:
+            width, height = self.window_size
+        aspect = width / float(max(height, 1))
+        projection = _perspective_matrix(60.0, aspect, 10.0, 60000.0)
+        view = self.camera.view_matrix()
+        eye = self.camera.position
+        self.ctx.viewport = (0, 0, width, height)
+        self.ctx.screen.clear(*self.fog_color.tolist(), 1.0)
+        self._render_sky()
+
+        terrain = self.terrain
+        assert terrain is not None
+        terrain.texture.use(location=0)
+        self.terrain_program["u_model"].write(np.eye(4, dtype=np.float32).tobytes())
+        self.terrain_program["u_view"].write(view.astype("f4").tobytes())
+        self.terrain_program["u_projection"].write(projection.astype("f4").tobytes())
+        self.terrain_program["u_texture"].value = 0
+        self.terrain_program["u_light_dir"].value = (-0.35, -1.0, -0.45)
+        self.terrain_program["u_fog_color"].value = tuple(self.fog_color.tolist())
+        self.terrain_program["u_fog_density"].value = self.fog_density
+        self.terrain_program["u_time"].value = time_value
+        self.terrain_program["u_camera_pos"].value = tuple(eye.tolist())
+        terrain.vao.render()
+
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+        for model_matrix, meshes in self.object_instances:
+            self.object_program["u_model"].write(model_matrix.astype("f4").tobytes())
+            self.object_program["u_view"].write(view.astype("f4").tobytes())
+            self.object_program["u_projection"].write(projection.astype("f4").tobytes())
+            self.object_program["u_light_dir"].value = (-0.35, -1.0, -0.45)
+            self.object_program["u_fog_color"].value = tuple(self.fog_color.tolist())
+            self.object_program["u_fog_density"].value = self.fog_density
+            self.object_program["u_camera_pos"].value = tuple(eye.tolist())
+            self.object_program["u_time"].value = time_value
+            for mesh in meshes:
+                flags = mesh.material_flags
+                self.object_program["u_material_flags"].value = int(flags)
+                if mesh.texture is not None:
+                    mesh.texture.use(location=0)
+                    self.object_program["u_texture"].value = 0
+                mesh.vao.render()
+        self.ctx.disable(moderngl.BLEND)
+
+        self._render_particles(view, projection, time_value)
+
+    def save_framebuffer(self, destination: Path) -> None:
+        if self.ctx is None:
+            return
+        if self.window is not None:
+            width, height = self.window.get_framebuffer_size()
+        else:
+            width, height = self.window_size
+        buffer = self.ctx.screen.read(components=4)
+        image = Image.frombytes("RGBA", (width, height), buffer)
+        image = image.transpose(Image.FLIP_TOP_BOTTOM)
+        image.save(destination)
+
+    def run(self, *, show: bool, output: Optional[Path]) -> None:
+        self._setup()
+        assert self.window is not None
+        if not show and output is not None:
+            self.render_frame()
+            self.save_framebuffer(output)
+            self.window.close()
+            return
+        pyglet.app.run()
+        if output is not None:
+            self.save_framebuffer(output)
 
 
 def bux_convert(data: bytearray) -> None:
@@ -634,6 +1553,116 @@ def bilinear_height(height: np.ndarray, x: float, y: float) -> float:
     return h1 * (1 - xd) + h2 * xd
 
 
+def _perspective_matrix(fov_deg: float, aspect: float, near: float, far: float) -> np.ndarray:
+    f = 1.0 / math.tan(math.radians(fov_deg) / 2.0)
+    matrix = np.zeros((4, 4), dtype=np.float32)
+    matrix[0, 0] = f / aspect
+    matrix[1, 1] = f
+    matrix[2, 2] = (far + near) / (near - far)
+    matrix[2, 3] = (2 * far * near) / (near - far)
+    matrix[3, 2] = -1.0
+    return matrix
+
+
+def _normalize(vec: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vec)
+    if norm == 0:
+        return vec
+    return vec / norm
+
+
+def _look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
+    fwd = _normalize(target - eye)
+    side = _normalize(np.cross(fwd, up))
+    up_vec = np.cross(side, fwd)
+    matrix = np.eye(4, dtype=np.float32)
+    matrix[0, :3] = side
+    matrix[1, :3] = up_vec
+    matrix[2, :3] = -fwd
+    matrix[:3, 3] = -matrix[:3, :3] @ eye
+    return matrix
+
+
+class OrbitCamera:
+    def __init__(self, target: np.ndarray, *, distance: float = 9000.0) -> None:
+        self.target = target.astype(np.float32)
+        self.distance = distance
+        self.yaw = math.radians(135.0)
+        self.pitch = math.radians(45.0)
+        self.min_pitch = math.radians(5.0)
+        self.max_pitch = math.radians(85.0)
+        self.min_distance = 1000.0
+        self.max_distance = 30000.0
+        self.move_speed = 600.0
+        self.orbit_speed = math.radians(60.0)
+        self.zoom_speed = 2000.0
+        self.velocity = np.zeros(3, dtype=np.float32)
+
+    @property
+    def position(self) -> np.ndarray:
+        cos_pitch = math.cos(self.pitch)
+        sin_pitch = math.sin(self.pitch)
+        cos_yaw = math.cos(self.yaw)
+        sin_yaw = math.sin(self.yaw)
+        direction = np.array(
+            [
+                cos_pitch * cos_yaw,
+                sin_pitch,
+                cos_pitch * sin_yaw,
+            ],
+            dtype=np.float32,
+        )
+        return self.target - direction * self.distance
+
+    def orbit(self, delta_yaw: float, delta_pitch: float) -> None:
+        self.yaw += delta_yaw
+        self.pitch = float(np.clip(self.pitch + delta_pitch, self.min_pitch, self.max_pitch))
+
+    def zoom(self, delta: float) -> None:
+        self.distance = float(np.clip(self.distance + delta, self.min_distance, self.max_distance))
+
+    def pan(self, offset: np.ndarray) -> None:
+        self.target += offset
+
+    def update(self, pressed: Sequence[int], dt: float) -> None:
+        forward = _normalize(self.target - self.position)
+        forward[1] = 0.0
+        forward = _normalize(forward)
+        right = _normalize(np.cross(forward, np.array([0.0, 1.0, 0.0], dtype=np.float32)))
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        move = np.zeros(3, dtype=np.float32)
+        if pyglet_key:
+            if pyglet_key.W in pressed:
+                move += forward
+            if pyglet_key.S in pressed:
+                move -= forward
+            if pyglet_key.A in pressed:
+                move -= right
+            if pyglet_key.D in pressed:
+                move += right
+            if pyglet_key.Q in pressed:
+                move -= up
+            if pyglet_key.E in pressed:
+                move += up
+            if pyglet_key.LEFT in pressed:
+                self.orbit(self.orbit_speed * dt, 0.0)
+            if pyglet_key.RIGHT in pressed:
+                self.orbit(-self.orbit_speed * dt, 0.0)
+            if pyglet_key.UP in pressed:
+                self.orbit(0.0, self.orbit_speed * dt)
+            if pyglet_key.DOWN in pressed:
+                self.orbit(0.0, -self.orbit_speed * dt)
+            if pyglet_key.Z in pressed:
+                self.zoom(-self.zoom_speed * dt)
+            if pyglet_key.X in pressed:
+                self.zoom(self.zoom_speed * dt)
+        if np.linalg.norm(move) > 0.0:
+            move = _normalize(move) * self.move_speed * dt
+            self.pan(move)
+
+    def view_matrix(self) -> np.ndarray:
+        return _look_at(self.position, self.target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+
 def _split_filter_values(values: Optional[Sequence[str]]) -> List[str]:
     tokens: List[str] = []
     if not values:
@@ -707,11 +1736,13 @@ def render_scene(
     view_mode: str = "3d",
     overlay: str = "textures",
     texture_library: Optional[TextureLibrary] = None,
+    renderer: str = "matplotlib",
+    bmd_library: Optional[BMDLibrary] = None,
+    fog_color: Optional[Tuple[float, float, float]] = None,
+    fog_density: Optional[float] = None,
 ) -> None:
-    heights = data.height
-    matrix, cmap_name = _overlay_matrix(data, overlay)
-
     if view_mode == "2d":
+        matrix, cmap_name = _overlay_matrix(data, overlay)
         fig, ax = plt.subplots(figsize=(9, 8))
         image = ax.imshow(matrix, origin="lower", cmap=cmap_name)
         cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
@@ -727,82 +1758,112 @@ def render_scene(
         ax.set_title(title or "Visualização 2D do terreno")
         ax.set_aspect("equal", adjustable="box")
         fig.tight_layout()
-    else:
-        fig = plt.figure(figsize=(10, 7))
-        ax = fig.add_subplot(111, projection="3d")
-
-        if overlay == "textures" and texture_library is not None:
-            xx, yy, render_heights, facecolors = texture_library.build_surface(data)
+        if output:
+            fig.savefig(output)
+            print(f"Visualização salva em {output}")
+        if show:
+            plt.show()
         else:
-            x = np.arange(TERRAIN_SIZE, dtype=np.float32)
-            y = np.arange(TERRAIN_SIZE, dtype=np.float32)
-            xx, yy = np.meshgrid(x, y)
-            render_heights = heights.astype(np.float32)
-            cmap = plt.get_cmap(cmap_name)
-            normalized = _normalize_for_colormap(matrix)
-            base_colors = cmap(normalized)
-            facecolors = base_colors[:-1, :-1, :]
-            shading = LightSource(azdeg=315, altdeg=55).shade(
-                render_heights, vert_exag=1.0, fraction=0.6
+            plt.close(fig)
+        return
+
+    if renderer == "opengl":
+        if moderngl is None or pyglet is None:
+            raise RuntimeError(
+                "Renderer OpenGL indisponível: instale 'moderngl' e 'pyglet' ou use --renderer matplotlib."
             )
-            facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
-            facecolors = np.clip(facecolors, 0.0, 1.0)
-
-        ax.plot_surface(
-            xx,
-            yy,
-            render_heights,
-            rstride=1,
-            cstride=1,
-            facecolors=facecolors,
-            linewidth=0,
-            antialiased=False,
-            shade=False,
+        if texture_library is None:
+            raise ValueError("O renderer OpenGL requer um TextureLibrary inicializado.")
+        app = OpenGLTerrainApp(
+            data,
+            objects,
+            texture_library=texture_library,
+            bmd_library=bmd_library,
+            overlay=overlay,
+            title=title or "Visualização OpenGL",
+            fog_color=fog_color or (0.25, 0.33, 0.45),
+            fog_density=fog_density or 0.00025,
         )
+        app.run(show=show, output=output)
+        return
 
-        scatter: Optional[Path3DCollection] = None
-        if objects:
-            ox = np.array([obj.tile_position[0] for obj in objects])
-            oy = np.array([obj.tile_position[1] for obj in objects])
-            oz = np.array([bilinear_height(heights, x, y) for x, y in zip(ox, oy)])
-            type_ids = np.array([obj.type_id for obj in objects], dtype=float)
-            if type_ids.size > 0:
-                ptp_val = np.ptp(type_ids)
-                if ptp_val > 0:
-                    colors = (type_ids - np.min(type_ids)) / ptp_val
-                else:
-                    colors = np.zeros_like(type_ids)
+    heights = data.height
+    matrix, cmap_name = _overlay_matrix(data, overlay)
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    if overlay == "textures" and texture_library is not None:
+        xx, yy, render_heights, facecolors = texture_library.build_surface(data)
+    else:
+        x = np.arange(TERRAIN_SIZE, dtype=np.float32)
+        y = np.arange(TERRAIN_SIZE, dtype=np.float32)
+        xx, yy = np.meshgrid(x, y)
+        render_heights = heights.astype(np.float32)
+        cmap = plt.get_cmap(cmap_name)
+        normalized = _normalize_for_colormap(matrix)
+        base_colors = cmap(normalized)
+        facecolors = base_colors[:-1, :-1, :]
+        shading = LightSource(azdeg=315, altdeg=55).shade(
+            render_heights, vert_exag=1.0, fraction=0.6
+        )
+        facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
+        facecolors = np.clip(facecolors, 0.0, 1.0)
+
+    ax.plot_surface(
+        xx,
+        yy,
+        render_heights,
+        rstride=1,
+        cstride=1,
+        facecolors=facecolors,
+        linewidth=0,
+        antialiased=False,
+        shade=False,
+    )
+
+    scatter: Optional[Path3DCollection] = None
+    if objects:
+        ox = np.array([obj.tile_position[0] for obj in objects])
+        oy = np.array([obj.tile_position[1] for obj in objects])
+        oz = np.array([bilinear_height(heights, x, y) for x, y in zip(ox, oy)])
+        type_ids = np.array([obj.type_id for obj in objects], dtype=float)
+        if type_ids.size > 0:
+            ptp_val = np.ptp(type_ids)
+            if ptp_val > 0:
+                colors = (type_ids - np.min(type_ids)) / ptp_val
             else:
                 colors = np.zeros_like(type_ids)
-            scatter = ax.scatter(
-                ox,
-                oy,
-                oz + 50.0,
-                c=colors,
-                cmap="tab20",
-                s=10,
-                depthshade=False,
-                picker=True,
-                pickradius=5,
-            )
+        else:
+            colors = np.zeros_like(type_ids)
+        scatter = ax.scatter(
+            ox,
+            oy,
+            oz + 50.0,
+            c=colors,
+            cmap="tab20",
+            s=10,
+            depthshade=False,
+            picker=True,
+            pickradius=5,
+        )
 
-            if enable_object_edit and show:
-                editor = ObjectEditor(
-                    fig,
-                    ax,
-                    scatter,
-                    objects,
-                    data.height,
-                    camera_controls=True,
-                )
-                fig._terrain_object_editor = editor  # type: ignore[attr-defined]
-
-        if show:
-            fig._terrain_camera_navigator = CameraNavigator(  # type: ignore[attr-defined]
+        if enable_object_edit and show:
+            editor = ObjectEditor(
                 fig,
                 ax,
-                terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
+                scatter,
+                objects,
+                data.height,
+                camera_controls=True,
             )
+            fig._terrain_object_editor = editor  # type: ignore[attr-defined]
+
+    if show:
+        fig._terrain_camera_navigator = CameraNavigator(  # type: ignore[attr-defined]
+            fig,
+            ax,
+            terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
+        )
 
         ax.set_xlabel("X (tiles)")
         ax.set_ylabel("Y (tiles)")
@@ -1545,6 +2606,9 @@ def run_viewer(
     export_json: Optional[Path] = None,
     save_objects: Optional[Path] = None,
     texture_detail: int = 2,
+    renderer: str = "matplotlib",
+    fog_density: Optional[float] = None,
+    fog_color: Optional[Tuple[float, float, float]] = None,
 ) -> TerrainLoadResult:
     result = load_world_data(
         world_path,
@@ -1576,12 +2640,32 @@ def run_viewer(
 
     if render:
         texture_library: Optional[TextureLibrary] = None
-        if view_mode == "3d" and overlay == "textures":
+        if renderer == "opengl":
             texture_library = TextureLibrary(
                 display_result.world_path,
                 detail_factor=max(1, texture_detail),
                 object_path=object_path,
             )
+        elif view_mode == "3d" and overlay == "textures":
+            texture_library = TextureLibrary(
+                display_result.world_path,
+                detail_factor=max(1, texture_detail),
+                object_path=object_path,
+            )
+
+        bmd_library: Optional[BMDLibrary] = None
+        if renderer == "opengl":
+            search_roots: List[Path] = []
+            if object_path:
+                search_roots.append(object_path)
+            guessed = guess_object_folder(world_path)
+            if guessed:
+                search_roots.append(guessed)
+            parent = world_path.parent
+            if parent not in search_roots:
+                search_roots.append(parent)
+            bmd_library = BMDLibrary(search_roots)
+
         render_scene(
             display_result.data,
             display_result.objects,
@@ -1592,6 +2676,10 @@ def run_viewer(
             view_mode=view_mode,
             overlay=overlay,
             texture_library=texture_library,
+            renderer=renderer,
+            bmd_library=bmd_library,
+            fog_density=fog_density,
+            fog_color=fog_color,
         )
         if texture_library is not None and texture_library.missing_indices:
             preview = ", ".join(map(str, texture_library.missing_indices[:10]))
@@ -1676,6 +2764,9 @@ class TerrainViewerGUI:
         self.include_filter_var = tk.StringVar()
         self.exclude_filter_var = tk.StringVar()
         self.texture_detail_var = tk.StringVar(value="2")
+        self.renderer_var = tk.StringVar(value="OpenGL")
+        self.fog_density_var = tk.StringVar()
+        self.fog_color_var = tk.StringVar()
 
         self.object_dir_var = tk.StringVar()
         self.status_var = tk.StringVar()
@@ -1688,6 +2779,7 @@ class TerrainViewerGUI:
             "Altura": "height",
             "Atributos": "attributes",
         }
+        self.renderer_map = {"OpenGL": "opengl", "Matplotlib": "matplotlib"}
         if enum_path and enum_path.exists():
             self.enum_path = enum_path
         elif DEFAULT_ENUM_PATH.exists():
@@ -1734,6 +2826,9 @@ class TerrainViewerGUI:
         include: Optional[str],
         exclude: Optional[str],
         texture_detail: int,
+        renderer: str,
+        fog_density: Optional[float],
+        fog_color: Optional[Tuple[float, float, float]],
     ) -> Tuple[str, ...]:
         return (
             str(world_path.resolve()),
@@ -1747,6 +2842,9 @@ class TerrainViewerGUI:
             include or "",
             exclude or "",
             str(texture_detail),
+            renderer,
+            "" if fog_density is None else f"{fog_density:.6f}",
+            "" if fog_color is None else ",".join(f"{component:.3f}" for component in fog_color),
         )
 
     def _can_reuse_last(self, params: Tuple[str, ...]) -> bool:
@@ -1765,6 +2863,9 @@ class TerrainViewerGUI:
         Optional[str],
         Optional[str],
         int,
+        str,
+        Optional[float],
+        Optional[Tuple[float, float, float]],
         Tuple[str, ...],
     ]:
         world_path = self._current_world_path()
@@ -1780,6 +2881,9 @@ class TerrainViewerGUI:
         texture_detail = _safe_int(self.texture_detail_var.get()) or 2
         if texture_detail < 1:
             texture_detail = 1
+        renderer = self.renderer_map.get(self.renderer_var.get(), "opengl")
+        fog_density = self._parse_float(self.fog_density_var.get())
+        fog_color = self._parse_color(self.fog_color_var.get())
         params = self._compose_params(
             world_path,
             map_id,
@@ -1791,6 +2895,9 @@ class TerrainViewerGUI:
             include,
             exclude,
             texture_detail,
+            renderer,
+            fog_density,
+            fog_color,
         )
         return (
             world_path,
@@ -1803,6 +2910,9 @@ class TerrainViewerGUI:
             include,
             exclude,
             texture_detail,
+            renderer,
+            fog_density,
+            fog_color,
             params,
         )
 
@@ -1867,21 +2977,39 @@ class TerrainViewerGUI:
             row=2, column=5, sticky="w"
         )
 
-        tk.Label(options_frame, text="Mostrar apenas (ID/nome):").grid(row=3, column=0, sticky="w")
-        tk.Entry(options_frame, textvariable=self.include_filter_var, width=20).grid(row=3, column=1, sticky="ew")
+        tk.Label(options_frame, text="Renderer:").grid(row=2, column=6, sticky="w")
+        tk.OptionMenu(
+            options_frame,
+            self.renderer_var,
+            *self.renderer_map.keys(),
+        ).grid(row=2, column=7, sticky="ew")
 
-        tk.Label(options_frame, text="Ocultar (ID/nome):").grid(row=3, column=2, sticky="w")
-        tk.Entry(options_frame, textvariable=self.exclude_filter_var, width=20).grid(row=3, column=3, sticky="ew")
+        tk.Label(options_frame, text="Névoa densidade:").grid(row=3, column=0, sticky="w")
+        tk.Entry(options_frame, textvariable=self.fog_density_var, width=10).grid(
+            row=3, column=1, sticky="w"
+        )
+
+        tk.Label(options_frame, text="Cor névoa (R,G,B):").grid(row=3, column=2, sticky="w")
+        tk.Entry(options_frame, textvariable=self.fog_color_var, width=20).grid(
+            row=3, column=3, columnspan=3, sticky="ew"
+        )
+
+        tk.Label(options_frame, text="Mostrar apenas (ID/nome):").grid(row=4, column=0, sticky="w")
+        tk.Entry(options_frame, textvariable=self.include_filter_var, width=20).grid(row=4, column=1, sticky="ew")
+
+        tk.Label(options_frame, text="Ocultar (ID/nome):").grid(row=4, column=2, sticky="w")
+        tk.Entry(options_frame, textvariable=self.exclude_filter_var, width=20).grid(row=4, column=3, sticky="ew")
 
         self.edit_checkbox = tk.Checkbutton(
             options_frame,
             text="Permitir mover objetos (janela interativa)",
             variable=self.edit_objects_var,
         )
-        self.edit_checkbox.grid(row=4, column=0, columnspan=4, sticky="w")
+        self.edit_checkbox.grid(row=5, column=0, columnspan=4, sticky="w")
 
         options_frame.columnconfigure(1, weight=1)
         options_frame.columnconfigure(3, weight=1)
+        options_frame.columnconfigure(7, weight=1)
 
         buttons_frame = tk.Frame(self.root)
         buttons_frame.grid(row=2, column=0, sticky="e", **padding)
@@ -1967,6 +3095,9 @@ class TerrainViewerGUI:
                 _,
                 _,
                 texture_detail,
+                renderer,
+                fog_density,
+                fog_color,
                 params,
             ) = self._gather_context()
         except Exception as exc:  # noqa: BLE001
@@ -1987,12 +3118,24 @@ class TerrainViewerGUI:
                     f" {len(self.last_result.objects)} objetos"
                 )
                 texture_library = None
-                if overlay == "textures":
+                if renderer == "opengl" or overlay == "textures":
                     texture_library = TextureLibrary(
                         world_path,
                         detail_factor=max(1, texture_detail),
                         object_path=object_dir,
                     )
+                bmd_library = None
+                if renderer == "opengl":
+                    search_roots: List[Path] = []
+                    if object_dir:
+                        search_roots.append(object_dir)
+                    guessed = guess_object_folder(world_path)
+                    if guessed:
+                        search_roots.append(guessed)
+                    parent = world_path.parent
+                    if parent not in search_roots:
+                        search_roots.append(parent)
+                    bmd_library = BMDLibrary(search_roots)
                 render_scene(
                     self.last_result.data,
                     self.last_result.objects,
@@ -2003,6 +3146,10 @@ class TerrainViewerGUI:
                     view_mode=view_mode,
                     overlay=overlay,
                     texture_library=texture_library,
+                    renderer=renderer,
+                    bmd_library=bmd_library,
+                    fog_density=fog_density,
+                    fog_color=fog_color,
                 )
             else:
                 self._run(show=False, output=destination)
@@ -2012,7 +3159,8 @@ class TerrainViewerGUI:
 
     def export_objects(self) -> None:
         try:
-            (_, _, _, _, _, _, _, _, _, _, params) = self._gather_context()
+            context = self._gather_context()
+            params = context[-1]
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
             return
@@ -2035,7 +3183,8 @@ class TerrainViewerGUI:
 
     def export_json(self) -> None:
         try:
-            (_, _, _, _, _, _, _, _, _, _, params) = self._gather_context()
+            context = self._gather_context()
+            params = context[-1]
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
             return
@@ -2058,7 +3207,8 @@ class TerrainViewerGUI:
 
     def save_objects_dialog(self) -> None:
         try:
-            (_, _, _, _, _, _, _, _, _, _, params) = self._gather_context()
+            context = self._gather_context()
+            params = context[-1]
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", str(exc))
             return
@@ -2115,6 +3265,9 @@ class TerrainViewerGUI:
             include,
             exclude,
             texture_detail,
+            renderer,
+            fog_density,
+            fog_color,
             params,
         ) = self._gather_context()
         include_filters = [include] if include else None
@@ -2137,11 +3290,14 @@ class TerrainViewerGUI:
             enable_object_edit=self.edit_objects_var.get(),
             view_mode=view_mode,
             overlay=overlay,
+            renderer=renderer,
             include_filters=include_filters,
             exclude_filters=exclude_filters,
             export_json=export_json,
             save_objects=save_objects_path,
             texture_detail=texture_detail,
+            fog_density=fog_density,
+            fog_color=fog_color,
         )
         self.map_id_var.set(str(result.map_id))
         self.status_var.set(format_summary_line(result))
@@ -2158,6 +3314,20 @@ class TerrainViewerGUI:
             return float(value)
         except ValueError:
             raise ValueError("Height scale inválido.")
+
+    @staticmethod
+    def _parse_color(value: str) -> Optional[Tuple[float, float, float]]:
+        value = value.strip()
+        if not value:
+            return None
+        parts = [part for part in re.split(r"[;,\s]+", value) if part]
+        if len(parts) != 3:
+            raise ValueError("Cor da névoa deve ter três componentes (R G B).")
+        try:
+            floats = [float(part) for part in parts]
+        except ValueError as exc:  # noqa: B904
+            raise ValueError("Valores inválidos para a cor da névoa.") from exc
+        return (floats[0], floats[1], floats[2])
 
     def run(self) -> None:
         self.root.mainloop()
@@ -2242,10 +3412,30 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Coloração aplicada ao terreno (texturas, altura ou atributos).",
     )
     parser.add_argument(
+        "--renderer",
+        choices=["matplotlib", "opengl"],
+        default="opengl",
+        help="Motor de renderização: Matplotlib clássico ou OpenGL com texturas reais.",
+    )
+    parser.add_argument(
         "--texture-detail",
         type=int,
         default=2,
         help="Subdivisões por tile ao rasterizar texturas reais (>=1).",
+    )
+    parser.add_argument(
+        "--fog-density",
+        type=float,
+        dest="fog_density",
+        help="Densidade da névoa no renderer OpenGL (padrão adaptativo).",
+    )
+    parser.add_argument(
+        "--fog-color",
+        nargs=3,
+        type=float,
+        metavar=("R", "G", "B"),
+        dest="fog_color",
+        help="Cor da névoa no renderer OpenGL (componentes 0-1).",
     )
     parser.add_argument(
         "--filter",
@@ -2283,11 +3473,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         enable_object_edit=args.edit_objects,
         view_mode=args.view_mode,
         overlay=args.overlay,
+        renderer=args.renderer,
         include_filters=args.include_filters,
         exclude_filters=args.exclude_filters,
         export_json=args.export_json,
         save_objects=args.save_objects,
         texture_detail=max(1, args.texture_detail),
+        fog_density=args.fog_density,
+        fog_color=tuple(args.fog_color) if args.fog_color else None,
     )
 
 
