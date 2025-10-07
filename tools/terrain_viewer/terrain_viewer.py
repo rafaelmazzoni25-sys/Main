@@ -820,6 +820,29 @@ class TextureLibrary:
         self._light_image_uint8: Optional[np.ndarray] = None
         self._light_map_cache: Dict[int, np.ndarray] = {}
 
+    def _light_candidates(self) -> List[str]:
+        base = [
+            "TerrainLight",
+            "TerrainLight0",
+            "TerrainLight1",
+            "TerrainLight2",
+            "TerrainLight3",
+        ]
+        prioritized: List[str] = []
+        if self.map_id == 30:  # Battle Castle
+            prioritized.extend(["TerrainLight2", "TerrainLight"])
+        elif self.map_id == 34:  # Crywolf
+            prioritized.extend(["TerrainLight", "TerrainLight1", "TerrainLight2"])
+
+        ordered: List[str] = []
+        seen: Set[str] = set()
+        for name in itertools.chain(prioritized, base):
+            if name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+        return ordered
+
     def _build_search_roots(self) -> List[Path]:
         roots: List[Path] = []
 
@@ -843,15 +866,8 @@ class TextureLibrary:
         if self._light_image_loaded:
             return self._light_image_uint8
         self._light_image_loaded = True
-        candidates = [
-            "TerrainLight",
-            "TerrainLight0",
-            "TerrainLight1",
-            "TerrainLight2",
-            "TerrainLight3",
-        ]
         search = [self.world_path]
-        for name in candidates:
+        for name in self._light_candidates():
             for path in _iter_candidate_paths(search, name, IMAGE_EXTENSIONS):
                 image = _load_image_file(path)
                 if image is None:
