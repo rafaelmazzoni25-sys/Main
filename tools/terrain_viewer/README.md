@@ -251,8 +251,10 @@ a dia:
   arquivos `.att/.map` no mesmo fluxo.
 - **Comparação entre revisões.** Uma visualização lado a lado (ou modo diff)
   destacaria objetos adicionados/removidos entre duas pastas `WorldX`.
-- **Renderização com recursos do jogo.** Carregar as texturas reais e aplicar
-  shaders/iluminação aproximada deixaria a prévia ainda mais próxima do cliente.
+- **Perfis visuais adicionais.** Permitir salvar presets personalizados de
+  iluminação/névoa ajudaria a alternar rapidamente entre condições comuns de
+  review (ex.: noite chuvosa, manhã sem neblina) sem reconfigurar os controles
+  manualmente.
 
 ## Exemplo
 
