@@ -1,25 +1,49 @@
-# Estado do `terrain_viewer`
+# Estado do `Terrain_Editor`
 
-## Cobertura atual em relação ao cliente legado
+A antiga ferramenta em Python foi substituída por uma aplicação C++ (`tools/Terrain_Editor`)
+que mantém o pipeline de leitura dos arquivos `EncTerrain` e adiciona um renderer
+compatível com OpenGL clássico.
+
+## Implementação atual
 
 ### Carregamento de terreno e atributos
-* O utilitário Python reproduz a rotina de decodificação `MapFileDecrypt`, aplica o mesmo XOR/Bux e valida cabeçalhos para `EncTerrain*.att` e `EncTerrain*.map`, reconstituindo as camadas de textura, alpha e atributos exatamente como o cliente C++.【F:tools/terrain_viewer/terrain_viewer.py†L973-L999】【F:tools/terrain_viewer/terrain_viewer.py†L3063-L3113】【F:source/ZzzLodTerrain.cpp†L131-L205】【F:source/ZzzLodTerrain.cpp†L285-L343】
-* Os dois formatos de altura (`TerrainHeight.OZB` clássico e `TerrainHeightNew.OZB`) são suportados com os mesmos fatores de escala utilizados pelo jogo original.【F:tools/terrain_viewer/terrain_viewer.py†L3116-L3141】【F:source/ZzzLodTerrain.cpp†L513-L596】
-* As texturas de tile são buscadas pelas mesmas convenções de nomes, com fallback para índices estendidos, replicando o carregamento feito pelo `MapManager` no cliente.【F:tools/terrain_viewer/terrain_viewer.py†L801-L915】【F:source/MapManager.cpp†L1440-L1499】
+* O carregador C++ reproduz as rotinas `MapFileDecrypt` e `BuxConvert`, valida os
+  cabeçalhos dos arquivos `EncTerrain*.att`/`.map` e reconstrói camadas de tile,
+  alpha e atributos com o mesmo tamanho de grade do cliente original.【F:tools/Terrain_Editor/src/WorldLoader.cpp†L23-L125】【F:tools/Terrain_Editor/src/WorldLoader.cpp†L209-L271】
+* Os dois formatos de altura (`TerrainHeight.OZB` e `TerrainHeightNew.OZB`) são
+  suportados, incluindo o fator de escala clássico e a conversão RGB→altura do
+  formato estendido.【F:tools/Terrain_Editor/src/WorldLoader.cpp†L273-L317】
 
 ### Objetos estáticos (`EncTerrain*.obj`)
-* O parser Python lê `EncTerrain*.obj`, preserva versão, ID de mapa, posições, rotações e escala, atribui nomes usando `_enum.h` e pode exportar novamente com o algoritmo inverso de encriptação, mantendo compatibilidade com o formato original.【F:tools/terrain_viewer/terrain_viewer.py†L3144-L3187】【F:tools/terrain_viewer/terrain_viewer.py†L3966-L4025】【F:tools/terrain_viewer/terrain_viewer.py†L4168-L4183】【F:source/ZzzObject.cpp†L5057-L5118】
+* O parser nativo descriptografa `EncTerrain*.obj`, lê versão, ID do mapa,
+  posições, rotações e escala, e associa nomes simbólicos a partir do
+  `_enum.h` original quando disponível.【F:tools/Terrain_Editor/src/WorldLoader.cpp†L319-L380】
+* Após o carregamento, cada objeto é reposicionado usando amostragem bilinear da
+  malha de altura para garantir alinhamento visual ao terreno renderizado.【F:tools/Terrain_Editor/src/WorldLoader.cpp†L167-L199】
 
-### Renderização e recursos gráficos
-* O modo OpenGL reconstrói a malha do terreno com normal map, máscara de sombras e atributos por tile, além de combinar texturas em múltiplas camadas como o cliente DirectX9, permitindo iluminação dinâmica e materiais especiais (água, lava, aditivos).【F:tools/terrain_viewer/terrain_viewer.py†L1684-L1871】【F:tools/terrain_viewer/terrain_viewer.py†L2477-L2578】
-* Modelos BMD são carregados com ossos, animações, eventos e attachments; o `BMDAnimationPlayer` realiza blending e skinning idênticos ao pipeline do cliente.【F:tools/terrain_viewer/terrain_viewer.py†L544-L689】【F:tools/terrain_viewer/terrain_viewer.py†L2103-L2221】【F:source/ZzzBMD.cpp†L55-L166】
-* Os materiais herdam shaders especializados que simulam água/lava animadas, aplicam fog com os mesmos parâmetros, recebem o gradiente de céu e suportam emissores de partículas atmosféricas para poeira, fagulhas e neve sem depender do loop do jogo.【F:tools/terrain_viewer/terrain_viewer.py†L2509-L2577】【F:tools/terrain_viewer/terrain_viewer.py†L2587-L2999】【F:tools/terrain_viewer/terrain_viewer.py†L2678-L3059】
-* O utilitário expõe o mesmo conjunto de saídas auxiliares (resumo estatístico, exportação CSV/JSON e regravação de `EncTerrain`) que facilitam auditoria e edição externa, algo inexistente no executável legado.【F:tools/terrain_viewer/terrain_viewer.py†L4028-L4200】【F:tools/terrain_viewer/terrain_viewer.py†L4680-L4973】
-* A iluminação estática replica o carregamento de `TerrainLight*.jpg` e o cálculo de luminosidade do cliente: o `TextureLibrary` prioriza as variantes corretas para Battle Castle/Crywolf, usa o mesmo vetor direcional e multiplica tanto a malha Matplotlib quanto o pipeline OpenGL pelo mapa de luz e pelo dot product com as normais.【F:tools/terrain_viewer/terrain_viewer.py†L823-L1017】【F:tools/terrain_viewer/terrain_viewer.py†L1873-L1908】【F:source/MapManager.cpp†L1388-L1435】【F:source/ZzzLodTerrain.cpp†L411-L437】
+### Renderização e controles
+* A malha do terreno é triangulada em C++, calculando normais suaves a partir da
+  grade de alturas e aplicando uma paleta determinística de cores por tile.【F:tools/Terrain_Editor/src/TerrainMesh.cpp†L13-L88】【F:tools/Terrain_Editor/src/TilePalette.cpp†L5-L36】
+* O renderer utiliza o pipeline compatível do OpenGL 2.1, configurando câmera
+  orbital, iluminação direcional simples e desenhando os objetos como eixos
+  coloridos para facilitar inspeção rápida antes da futura integração do
+  pipeline BMD.【F:tools/Terrain_Editor/src/Renderer.cpp†L12-L134】
+* A aplicação expõe uma janela interativa via GLFW, com orbit/pan via mouse e
+  zoom por teclado (`Q`/`E`), replicando o fluxo de inspeção dos mapas sem
+  depender do cliente original.【F:tools/Terrain_Editor/src/Application.cpp†L11-L75】【F:tools/Terrain_Editor/src/Renderer.cpp†L36-L91】
 
-## Pontos ainda diferentes do cliente original
-* O viewer ignora rotinas de tempo real do cliente, como troca dinâmica de texturas de luz/neblina em eventos (`MapManager::CreateTerrain`, `SetTerrainWaterState`) ou geração procedural de grama animada; esses comportamentos surgem somente a partir de mensagens do servidor e, portanto, continuam fora do escopo.【F:source/ZzzLodTerrain.cpp†L260-L343】【F:source/MapManager.cpp†L1381-L1439】
-* Sistemas acoplados ao runtime (spawn de monstros, partículas específicas de eventos, lógica de colisão baseada em `TerrainWall`) permanecem exclusivos do executável C++, já que o script atua como ferramenta offline de inspeção/edição e não substitui o loop do jogo.
+## Itens ainda pendentes
+* Texturas de tile, materiais especiais (água/lava) e partículas atmosféricas
+  ainda não foram reimplementados na versão C++; o visual atual usa coloração
+  sintética para manter a legibilidade da topografia.【F:tools/Terrain_Editor/src/Renderer.cpp†L96-L134】【F:tools/Terrain_Editor/src/TilePalette.cpp†L17-L34】
+* Modelos BMD, animações e efeitos de pós-processamento continuam pendentes para
+  atingir paridade total com o cliente. As estruturas de carregamento já
+  preservam metadados suficientes para essa etapa futura.【F:tools/Terrain_Editor/src/WorldLoader.cpp†L333-L380】
 
 ## Conclusão
-O `terrain_viewer` cobre integralmente o pipeline de leitura de terreno/objetos e fornece um renderer equivalente (com modos OpenGL e Matplotlib), suficiente para reproduzir a cena estática do jogo e editar `EncTerrain`. A combinação das texturas originais, iluminação multi-passos, malha de altura, animações BMD, materiais com água/lava animadas, partículas e céu/névoa dinâmicos garante que a visualização ofereça o mesmo aspecto do projeto base sem depender do cliente legado, permitindo inspecionar mapas completos com objetos e efeitos offline. As diferenças residem apenas em rotinas que exigem dados em tempo real do servidor e na integração com sistemas de gameplay, que estão fora do escopo da ferramenta.
+
+O `Terrain_Editor` fornece um visualizador nativo multiplataforma capaz de ler os
+mesmos arquivos `EncTerrain` do projeto base, gerar a malha do mapa, alinhar os
+objetos e permitir inspeção interativa sem dependências externas de Python. A
+fidelidade visual será ampliada em iterações futuras com a integração do sistema
+completo de materiais e modelos animados.

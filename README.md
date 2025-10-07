@@ -14,6 +14,10 @@ A Main.exe é um componente essencial do MuOnline, responsável por executar o c
 - Novos recursos: Introduzimos novos recursos e funcionalidades na Main.exe para melhorar a jogabilidade e enriquecer a experiência dos jogadores.
 - Documentação: Incluímos uma documentação detalhada para auxiliar os desenvolvedores na compreensão do código-fonte e na realização de modificações personalizadas.
 
+## Ferramentas auxiliares
+
+- **Terrain_Editor (C++)** – novo visualizador em OpenGL que lê os mesmos arquivos `EncTerrain` do cliente, gera a malha do mapa e posiciona objetos estáticos para inspeção rápida sem depender do script Python legado.【F:tools/Terrain_Editor/README.md†L1-L41】
+
 ## Requisitos
 
 Certifique-se de ter os seguintes requisitos antes de prosseguir:
