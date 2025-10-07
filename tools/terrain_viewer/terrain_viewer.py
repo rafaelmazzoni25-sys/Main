@@ -2327,6 +2327,8 @@ class OpenGLTerrainApp:
         self._particle_vbo: Optional["moderngl.Buffer"] = None
         self._particle_count = 0
         self._particle_vao: Optional["moderngl.VertexArray"] = None
+        self._skybox_vao: Optional["moderngl.VertexArray"] = None
+        self._sky_gradient_vao: Optional["moderngl.VertexArray"] = None
         self.object_instances: List[BMDInstance] = []
         self.directional_light_dir = texture_library.light_direction()
         self.directional_light_color = np.array([1.0, 0.96, 0.88], dtype=np.float32)
@@ -2654,6 +2656,19 @@ class OpenGLTerrainApp:
                 """
             ),
         )
+
+        if self._skybox_vao is not None:
+            try:
+                self._skybox_vao.release()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._sky_gradient_vao is not None:
+            try:
+                self._sky_gradient_vao.release()
+            except Exception:  # noqa: BLE001
+                pass
+        self._skybox_vao = self.ctx.vertex_array(self.skybox_program, [])
+        self._sky_gradient_vao = self.ctx.vertex_array(self.sky_program, [])
 
         self.particle_program = self.ctx.program(
             vertex_shader=textwrap.dedent(
@@ -3004,11 +3019,15 @@ class OpenGLTerrainApp:
         assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.screen.use()
-        if self.sky_texture is not None and self.skybox_program is not None:
+        if (
+            self.sky_texture is not None
+            and self.skybox_program is not None
+            and self._skybox_vao is not None
+        ):
             self.sky_texture.use(location=3)
             self.skybox_program["u_sky"].value = 3
-            self.skybox_program.run(vertices=3)
-        if self.sky_program is not None:
+            self._skybox_vao.render(mode=moderngl.TRIANGLES, vertices=3)
+        if self.sky_program is not None and self._sky_gradient_vao is not None:
             cycle = (math.sin(time_value * 0.05) + 1.0) * 0.5
             day_top = np.array([0.32, 0.45, 0.72], dtype=np.float32)
             night_top = np.array([0.05, 0.08, 0.18], dtype=np.float32)
@@ -3016,7 +3035,7 @@ class OpenGLTerrainApp:
             bottom = self.fog_color * (0.7 + 0.3 * cycle)
             self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
             self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
-            self.sky_program.run(vertices=3)
+            self._sky_gradient_vao.render(mode=moderngl.TRIANGLES, vertices=3)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
