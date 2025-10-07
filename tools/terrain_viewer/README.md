@@ -10,6 +10,24 @@ Com o renderer OpenGL habilitado é possível percorrer o cenário com o mesmo
 visual visto in-game sempre que as texturas `Tile*.jpg/.ozj/.ozt` e os arquivos
 `Data/ObjectX/*.bmd` estiverem presentes.
 
+### O que o renderer OpenGL reproduz do cliente
+
+* **Iluminação multi-passos** – a malha do terreno recebe uma etapa difusa
+  seguida por um passe especular aditivo que realça reflexos d'água, lava e
+  materiais brilhantes, utilizando a mesma direção de luz do jogo original.
+* **Animações BMD** – o carregador lê as curvas de translação/rotação dos
+  ossos e aplica skinning nas malhas, fazendo com que portais, estruturas ou
+  criaturas com keyframes ganhem movimento automaticamente.
+* **Shaders especializados para água e lava** – os tiles com essas tags usam
+  deslocamento UV, ondulação dinâmica e reforço de cores para simular o fluxo
+  contínuo do jogo.
+* **Céu e névoa dinâmicos** – o gradiente do céu alterna suavemente entre tons
+  diurnos e noturnos de acordo com o relógio interno, sincronizando a névoa com
+  a paleta de cada período.
+* **Partículas atmosféricas** – pontos volumétricos com velocidades e tempos de
+  vida randômicos criam poeira, fagulhas e neve leve dependendo do mapa,
+  reforçando o clima geral.
+
 ## Pré-requisitos
 
 O script depende de Python 3.9+ com as bibliotecas abaixo:
@@ -138,6 +156,9 @@ edições feitas no editor interativo.
 Quando a visualização 3D estiver aberta, utilize **WASD/QE/IJKL** para navegar
 livremente pela cena. As setas do teclado continuam dedicadas ao movimento dos
 objetos selecionados, enquanto o scroll do mouse oferece um zoom incremental.
+Modelos BMD com animações têm suas curvas reproduzidas automaticamente no
+renderer OpenGL, então portais e criaturas presentes no mapa exibirão o mesmo
+movimento visto dentro do cliente.
 
 ### Linha de comando
 
