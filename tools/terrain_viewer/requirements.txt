@@ -1,2 +1,4 @@
 matplotlib>=3.5
 numpy>=1.23
+moderngl>=5.8
+pyglet>=1.5
