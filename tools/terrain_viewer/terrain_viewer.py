@@ -3501,13 +3501,31 @@ def render_scene(
             terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
         )
 
-    ax.set_xlabel("X (tiles)")
-    ax.set_ylabel("Y (tiles)")
-    ax.set_zlabel("Altura")
-    ax.view_init(elev=60, azim=45)
-    if title:
-        ax.set_title(title)
-    plt.tight_layout()
+        if enable_object_edit and show:
+            editor = ObjectEditor(
+                fig,
+                ax,
+                scatter,
+                objects,
+                data.height,
+                camera_controls=True,
+            )
+            fig._terrain_object_editor = editor  # type: ignore[attr-defined]
+
+    if show:
+        fig._terrain_camera_navigator = CameraNavigator(  # type: ignore[attr-defined]
+            fig,
+            ax,
+            terrain_bounds=(0.0, float(TERRAIN_SIZE - 1)),
+        )
+
+        ax.set_xlabel("X (tiles)")
+        ax.set_ylabel("Y (tiles)")
+        ax.set_zlabel("Altura")
+        ax.view_init(elev=60, azim=45)
+        if title:
+            ax.set_title(title)
+        plt.tight_layout()
 
     if output:
         fig.savefig(output)
