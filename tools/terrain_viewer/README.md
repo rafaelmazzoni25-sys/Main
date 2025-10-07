@@ -6,6 +6,10 @@ visualização interativa com dois motores: o novo renderer OpenGL (via
 `moderngl`/`pyglet`), que reproduz os azulejos originais do cliente com
 iluminação dinâmica, névoa configurável e os modelos BMD posicionados no mapa;
 e um modo compatível com o Matplotlib para ambientes sem aceleração gráfica.
+Com o renderer OpenGL ativo é possível inspecionar o mapa completo com objetos,
+animações, água/lava animadas, partículas atmosféricas e o céu gradiente sem
+depender do cliente original — apenas rotinas acionadas por eventos de servidor
+continuam fora do escopo da ferramenta.【F:tools/terrain_viewer/terrain_viewer.py†L2103-L2221】【F:tools/terrain_viewer/terrain_viewer.py†L2509-L2577】【F:tools/terrain_viewer/terrain_viewer.py†L2587-L3059】
 Com o renderer OpenGL habilitado é possível percorrer o cenário com o mesmo
 visual visto in-game sempre que as texturas `Tile*.jpg/.ozj/.ozt` e os arquivos
 `Data/ObjectX/*.bmd` estiverem presentes.
