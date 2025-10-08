@@ -55,10 +55,11 @@ except Exception:  # noqa: BLE001
 try:  # Optional windowing backend
     import pyglet
     from pyglet import gl as pyglet_gl  # noqa: F401  # used for type checking / side-effects
-    from pyglet.window import key as pyglet_key
+    from pyglet.window import key as pyglet_key, mouse as pyglet_mouse
 except Exception:  # noqa: BLE001
     pyglet = None  # type: ignore[assignment]
     pyglet_key = None  # type: ignore[assignment]
+    pyglet_mouse = None  # type: ignore[assignment]
 
 
 def _get_depth_mask(ctx: "moderngl.Context") -> Optional[bool]:
@@ -2364,7 +2365,7 @@ class OpenGLTerrainApp:
         self.skybox_program: Optional["moderngl.Program"] = None
         self.particle_program: Optional["moderngl.Program"] = None
         self.sky_texture: Optional["moderngl.Texture"] = None
-        self.camera: Optional[OrbitCamera] = None
+        self.camera: Optional[FreeCamera] = None
         self._pressed_keys: set[int] = set()
         self._start_time = 0.0
         self._last_frame_time = 0.0
@@ -2384,6 +2385,7 @@ class OpenGLTerrainApp:
         self.emissive_override = np.zeros(3, dtype=np.float32)
         self._default_white_texture: Optional["moderngl.Texture"] = None
         self._default_normal_texture: Optional["moderngl.Texture"] = None
+        self._mouse_captured = False
 
     def _init_programs(self) -> None:
         assert self.ctx is not None
@@ -2954,11 +2956,18 @@ class OpenGLTerrainApp:
             ],
             dtype=np.float32,
         )
-        self.camera = OrbitCamera(center)
+        extent = (TERRAIN_SIZE - 1) * TERRAIN_SCALE
+        start = center + np.array([-0.25 * extent, 0.2 * extent, 0.28 * extent], dtype=np.float32)
+        self.camera = FreeCamera.from_look_at(start, center)
         self._start_time = time.perf_counter()
         self._last_frame_time = self._start_time
         self.window.set_visible(True)
         self._bind_events()
+        print(
+            "Controles: W/A/S/D movem, Q/E ou Ctrl/Espaço ajustam altitude,"
+            " Shift acelera. Segure o botão direito do mouse para mirar livremente e"
+            " use a rolagem para ajustar a velocidade de voo."
+        )
 
     def _bind_events(self) -> None:
         assert self.window is not None
@@ -2969,11 +2978,32 @@ class OpenGLTerrainApp:
 
         @self.window.event
         def on_close() -> None:  # noqa: ANN001
+            if self._mouse_captured:
+                try:
+                    self.window.set_exclusive_mouse(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._mouse_captured = False
             pyglet.app.exit()
+
+        @self.window.event
+        def on_deactivate() -> None:  # noqa: ANN001
+            if self._mouse_captured:
+                try:
+                    self.window.set_exclusive_mouse(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._mouse_captured = False
 
         @self.window.event
         def on_key_press(symbol: int, _modifiers: int) -> None:
             if symbol == pyglet_key.ESCAPE:
+                if self._mouse_captured:
+                    try:
+                        self.window.set_exclusive_mouse(False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._mouse_captured = False
                 pyglet.app.exit()
                 return
             self._pressed_keys.add(symbol)
@@ -2983,16 +3013,46 @@ class OpenGLTerrainApp:
             if symbol in self._pressed_keys:
                 self._pressed_keys.remove(symbol)
 
+        if pyglet_mouse is not None:
+
+            @self.window.event
+            def on_mouse_press(_x: int, _y: int, button: int, _modifiers: int) -> None:
+                if button == pyglet_mouse.RIGHT:
+                    try:
+                        self.window.set_exclusive_mouse(True)
+                    except Exception:  # noqa: BLE001
+                        return
+                    self._mouse_captured = True
+
+            @self.window.event
+            def on_mouse_release(_x: int, _y: int, button: int, _modifiers: int) -> None:
+                if button == pyglet_mouse.RIGHT and self._mouse_captured:
+                    try:
+                        self.window.set_exclusive_mouse(False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._mouse_captured = False
+
+        @self.window.event
+        def on_mouse_motion(_x: int, _y: int, dx: float, dy: float) -> None:
+            if self._mouse_captured and self.camera:
+                self.camera.look(dx, dy)
+
+        @self.window.event
+        def on_mouse_drag(_x: int, _y: int, dx: float, dy: float, _buttons: int, _modifiers: int) -> None:
+            if self._mouse_captured and self.camera:
+                self.camera.look(dx, dy)
+
         @self.window.event
         def on_mouse_scroll(_x: int, _y: int, _dx: float, dy: float) -> None:
             if self.camera:
                 self.camera.zoom(-dy * 400.0)
 
-        def _update(dt: float) -> None:
-            if self.camera:
-                self.camera.update(self._pressed_keys, dt)
+        def _tick(_dt: float) -> None:
+            if self.window is not None:
+                self.window.invalid = True
 
-        pyglet.clock.schedule_interval(_update, 1 / 60.0)
+        pyglet.clock.schedule_interval(_tick, 1 / 120.0)
 
     def _render_sky(self, time_value: float) -> None:
         if self.focus_terrain_only:
@@ -3050,6 +3110,7 @@ class OpenGLTerrainApp:
             delta_time = 1.0 / 60.0
         else:
             delta_time = current_time - self._last_frame_time
+        delta_time = min(delta_time, 0.25)
         self._last_frame_time = current_time
         time_value = current_time - self._start_time
         if self.window is not None:
@@ -3058,6 +3119,7 @@ class OpenGLTerrainApp:
             width, height = self.window_size
         aspect = width / float(max(height, 1))
         projection = _perspective_matrix(60.0, aspect, 10.0, 60000.0)
+        self.camera.update(self._pressed_keys, delta_time)
         view = self.camera.view_matrix()
         eye = self.camera.position
         for instance in self.object_instances:
@@ -3381,6 +3443,120 @@ def _look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
     matrix[2, :3] = -fwd
     matrix[:3, 3] = -matrix[:3, :3] @ eye
     return matrix
+
+
+class FreeCamera:
+    def __init__(
+        self,
+        position: np.ndarray,
+        *,
+        yaw: float = math.radians(135.0),
+        pitch: float = math.radians(-20.0),
+        move_speed: float = 1200.0,
+        sprint_multiplier: float = 4.0,
+        mouse_sensitivity: float = 0.0025,
+    ) -> None:
+        self._position = position.astype(np.float32)
+        self.yaw = yaw
+        self.pitch = pitch
+        self.move_speed = move_speed
+        self.sprint_multiplier = sprint_multiplier
+        self.mouse_sensitivity = mouse_sensitivity
+        self.min_speed = 100.0
+        self.max_speed = 20000.0
+        self.max_pitch = math.radians(89.0)
+        self.velocity = np.zeros(3, dtype=np.float32)
+        self._acceleration = 12.0
+        self._damping = 0.15
+
+    @property
+    def position(self) -> np.ndarray:
+        return self._position
+
+    @classmethod
+    def from_look_at(
+        cls,
+        position: np.ndarray,
+        target: np.ndarray,
+        **kwargs: object,
+    ) -> "FreeCamera":
+        position = position.astype(np.float32)
+        target = target.astype(np.float32)
+        forward = _normalize(target - position)
+        yaw = math.atan2(forward[2], forward[0])
+        pitch = math.asin(float(np.clip(forward[1], -0.99999, 0.99999)))
+        return cls(position, yaw=yaw, pitch=pitch, **kwargs)
+
+    def direction(self) -> np.ndarray:
+        cos_pitch = math.cos(self.pitch)
+        sin_pitch = math.sin(self.pitch)
+        cos_yaw = math.cos(self.yaw)
+        sin_yaw = math.sin(self.yaw)
+        return np.array(
+            [
+                cos_pitch * cos_yaw,
+                sin_pitch,
+                cos_pitch * sin_yaw,
+            ],
+            dtype=np.float32,
+        )
+
+    def look(self, dx: float, dy: float) -> None:
+        self.yaw += dx * self.mouse_sensitivity
+        self.pitch -= dy * self.mouse_sensitivity
+        self.pitch = float(np.clip(self.pitch, -self.max_pitch, self.max_pitch))
+
+    def adjust_speed(self, factor: float) -> None:
+        self.move_speed = float(np.clip(self.move_speed * factor, self.min_speed, self.max_speed))
+
+    def zoom(self, delta: float) -> None:
+        if delta == 0.0:
+            return
+        factor = 1.0 + abs(delta) / 4000.0
+        if delta > 0:
+            self.adjust_speed(factor)
+        else:
+            self.adjust_speed(1.0 / factor)
+
+    def update(self, pressed: Sequence[int], dt: float) -> None:
+        if dt <= 0.0:
+            return
+        forward = _normalize(self.direction())
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, up)
+        if np.linalg.norm(right) < 1e-5:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            right = _normalize(right)
+        move = np.zeros(3, dtype=np.float32)
+        if pyglet_key:
+            if pyglet_key.W in pressed:
+                move += forward
+            if pyglet_key.S in pressed:
+                move -= forward
+            if pyglet_key.A in pressed:
+                move -= right
+            if pyglet_key.D in pressed:
+                move += right
+            if pyglet_key.Q in pressed or getattr(pyglet_key, "LCTRL", None) in pressed:
+                move -= up
+            if pyglet_key.E in pressed or getattr(pyglet_key, "SPACE", None) in pressed:
+                move += up
+        if np.linalg.norm(move) > 0.0:
+            move = _normalize(move)
+        target_velocity = move * self.move_speed
+        if pyglet_key:
+            if getattr(pyglet_key, "LSHIFT", None) in pressed or getattr(pyglet_key, "RSHIFT", None) in pressed:
+                target_velocity *= self.sprint_multiplier
+        lerp = float(np.clip(self._acceleration * dt, 0.0, 1.0))
+        self.velocity = self.velocity * (1.0 - lerp) + target_velocity * lerp
+        if np.linalg.norm(move) == 0.0:
+            self.velocity *= max(0.0, 1.0 - self._damping)
+        self._position += self.velocity * dt
+
+    def view_matrix(self) -> np.ndarray:
+        target = self.position + self.direction()
+        return _look_at(self.position, target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
 
 
 class OrbitCamera:
