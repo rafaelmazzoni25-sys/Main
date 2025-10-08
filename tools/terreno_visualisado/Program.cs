@@ -89,6 +89,21 @@ internal static class Program
             var waterTiles = visual.MaterialFlagsPerTile.Count(flag => (flag & (uint)MaterialFlags.Water) != 0);
             var lavaTiles = visual.MaterialFlagsPerTile.Count(flag => (flag & (uint)MaterialFlags.Lava) != 0);
             Console.WriteLine($"Tiles com água: {waterTiles}, lava: {lavaTiles}");
+            if (visual.LightMap is not null)
+            {
+                Console.WriteLine($"TerrainLight aplicado: {visual.LightMapPath ?? "arquivo detectado"}");
+            }
+            else
+            {
+                Console.WriteLine("TerrainLight aplicado: nenhum arquivo encontrado");
+            }
+            Console.WriteLine($"Mapa com CreateWaterTerrain: {(visual.HasWaterTerrain ? "sim" : "não")}");
+            if (visual.SpecialTextures.Count > 0)
+            {
+                var loaded = visual.SpecialTextures.Count(kv => !string.IsNullOrEmpty(kv.Value));
+                var missing = visual.SpecialTextures.Count - loaded;
+                Console.WriteLine($"Texturas especiais carregadas: {loaded}, ausentes: {missing}");
+            }
         }
 
         Console.WriteLine($"Modelos BMD carregados: {world.ModelLibrary.Models.Count} (falhas: {world.ModelLibrary.Failures.Count})");

@@ -1,8 +1,10 @@
+using System.Globalization;
+
 namespace TerrenoVisualisado.Core;
 
 public sealed class TextureLibrary
 {
-    private static readonly Dictionary<int, string[]> TileTextureCandidates = new()
+    private static readonly Dictionary<int, string[]> BaseTileTextureCandidates = new()
     {
         [0] = new[] { "TileGrass01", "TileGrass01_R" },
         [1] = new[] { "TileGrass02" },
@@ -24,7 +26,7 @@ public sealed class TextureLibrary
     {
         for (var ext = 1; ext <= 16; ext++)
         {
-            TileTextureCandidates[13 + ext] = new[] { $"ExtTile{ext:00}" };
+            BaseTileTextureCandidates[13 + ext] = new[] { $"ExtTile{ext:00}" };
         }
     }
 
@@ -34,11 +36,16 @@ public sealed class TextureLibrary
     private readonly HashSet<int> _missing = new();
     private readonly Dictionary<int, string> _resolvedPaths = new();
     private readonly int _detailFactor;
+    private readonly MapContext _context;
+    private readonly string _worldFolderName;
+    private readonly Dictionary<string, (TextureImage? Image, string? Path)> _arbitraryCache = new(StringComparer.OrdinalIgnoreCase);
 
-    public TextureLibrary(string worldDirectory, string? objectDirectory, int? mapId, int detailFactor = 2)
+    public TextureLibrary(string worldDirectory, string? objectDirectory, MapContext context, int detailFactor = 2)
     {
         _detailFactor = Math.Max(1, detailFactor);
-        _searchRoots = BuildSearchRoots(worldDirectory, objectDirectory, mapId);
+        _context = context;
+        _worldFolderName = Path.GetFileName(Path.GetFullPath(worldDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        _searchRoots = BuildSearchRoots(worldDirectory, objectDirectory, context);
     }
 
     public IReadOnlyCollection<int> MissingIndices => _missing;
@@ -50,7 +57,8 @@ public sealed class TextureLibrary
 
     public string? GetTileTextureName(int index)
     {
-        if (TileTextureCandidates.TryGetValue(index, out var candidates) && candidates.Length > 0)
+        var candidates = EnumerateTileCandidates(index).ToArray();
+        if (candidates.Length > 0)
         {
             return candidates[0];
         }
@@ -159,11 +167,7 @@ public sealed class TextureLibrary
             return cached;
         }
 
-        var candidates = TileTextureCandidates.TryGetValue(index, out var list) ? list : Array.Empty<string>();
-        if (candidates.Length == 0)
-        {
-            candidates = new[] { $"ExtTile{index:00}" };
-        }
+        var candidates = EnumerateTileCandidates(index);
 
         foreach (var candidate in candidates)
         {
@@ -186,6 +190,101 @@ public sealed class TextureLibrary
         return null;
     }
 
+    public (TextureImage? Image, string? Path) LoadArbitrary(string baseName)
+    {
+        if (_arbitraryCache.TryGetValue(baseName, out var cached))
+        {
+            return cached;
+        }
+
+        foreach (var root in _searchRoots)
+        {
+            foreach (var path in TextureFileLoader.EnumerateCandidatePaths(root, baseName))
+            {
+                if (TextureFileLoader.TryLoad(path, out var image))
+                {
+                    var result = (image, path);
+                    _arbitraryCache[baseName] = result;
+                    return result;
+                }
+            }
+        }
+
+        var fallback = ((TextureImage?)null, (string?)null);
+        _arbitraryCache[baseName] = fallback;
+        return fallback;
+    }
+
+    public (TextureImage? Image, string? Path) LoadTerrainLight(MapContext context)
+    {
+        foreach (var candidate in context.EnumerateTerrainLightCandidates())
+        {
+            var (image, path) = LoadArbitrary(Path.Combine(_worldFolderName, candidate));
+            if (image is not null)
+            {
+                return (image, path);
+            }
+        }
+
+        foreach (var candidate in context.EnumerateTerrainLightCandidates())
+        {
+            var (image, path) = LoadArbitrary(candidate);
+            if (image is not null)
+            {
+                return (image, path);
+            }
+        }
+
+        return (null, null);
+    }
+
+    public IReadOnlyDictionary<string, string?> LoadSpecialTextures(MapContext context)
+    {
+        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+        string? LoadFirst(params string[] candidates)
+        {
+            foreach (var candidate in candidates)
+            {
+                if (string.IsNullOrWhiteSpace(candidate))
+                {
+                    continue;
+                }
+                var (image, path) = LoadArbitrary(candidate);
+                if (image is not null || path is not null)
+                {
+                    return path;
+                }
+            }
+            return null;
+        }
+
+        if (!string.IsNullOrEmpty(_worldFolderName))
+        {
+            result["Leaf01"] = LoadFirst(Path.Combine(_worldFolderName, "leaf01"));
+            result["Leaf02"] = LoadFirst(Path.Combine(_worldFolderName, "leaf02"));
+        }
+        else
+        {
+            result["Leaf01"] = LoadFirst("leaf01");
+            result["Leaf02"] = LoadFirst("leaf02");
+        }
+
+        if (context.IsCryWolf)
+        {
+            result["Rain01"] = LoadFirst(Path.Combine("World1", "rain011"), Path.Combine("World1", "rain01"));
+        }
+        else
+        {
+            result["Rain01"] = LoadFirst(Path.Combine("World1", "rain01"));
+        }
+
+        result["Rain02"] = LoadFirst(Path.Combine("World1", "rain02"));
+        result["Rain03"] = LoadFirst(Path.Combine("World10", "rain03"));
+
+        return result;
+    }
+
     private static byte[] BuildFallbackColor(int index)
     {
         var random = (index * 2654435761u) ^ 0xA53B5E2Du;
@@ -206,7 +305,7 @@ public sealed class TextureLibrary
         return buffer;
     }
 
-    private static List<string> BuildSearchRoots(string worldDirectory, string? objectDirectory, int? mapId)
+    private static List<string> BuildSearchRoots(string worldDirectory, string? objectDirectory, MapContext context)
     {
         var roots = new List<string>();
         void Add(string? path)
@@ -238,9 +337,9 @@ public sealed class TextureLibrary
         }
         Add(objectDirectory);
 
-        if (mapId.HasValue && worldParent != null)
+        if (context.HasValidMapId && worldParent != null)
         {
-            var digits = mapId.Value.ToString();
+            var digits = context.MapId.ToString(CultureInfo.InvariantCulture);
             foreach (var child in worldParent.EnumerateDirectories())
             {
                 if (child.Name.Contains(digits, StringComparison.OrdinalIgnoreCase))
@@ -251,5 +350,98 @@ public sealed class TextureLibrary
         }
 
         return roots;
+    }
+
+    private IEnumerable<string> EnumerateTileCandidates(int index)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var list = new List<string>();
+
+        void AddCandidate(string candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                return;
+            }
+            if (seen.Add(candidate))
+            {
+                list.Add(candidate);
+            }
+        }
+
+        switch (index)
+        {
+            case 0:
+                if (_context.IsPkField || _context.IsDoppelGanger2)
+                {
+                    AddCandidate("TileGrass01_R");
+                }
+                AddCandidate("TileGrass01");
+                AddCandidate("TileGrass01_R");
+                break;
+            case 2:
+                if (_context.UsesAlphaGround01)
+                {
+                    AddCandidate("AlphaTileGround01");
+                }
+                AddCandidate("TileGround01");
+                AddCandidate("AlphaTileGround01");
+                AddCandidate("AlphaTile01");
+                break;
+            case 3:
+                if (_context.IsKanturuThird)
+                {
+                    AddCandidate("AlphaTileGround02");
+                }
+                AddCandidate("TileGround02");
+                AddCandidate("AlphaTileGround02");
+                break;
+            case 4:
+                if (_context.IsCursedTemple)
+                {
+                    AddCandidate("AlphaTileGround03");
+                }
+                AddCandidate("TileGround03");
+                AddCandidate("AlphaTileGround03");
+                break;
+            case 10:
+                if (_context.UsesAlphaTileForRock04)
+                {
+                    AddCandidate("AlphaTile01");
+                }
+                AddCandidate("TileRock04");
+                AddCandidate("AlphaTile01");
+                break;
+            case 11:
+                if (_context.IsPkField || _context.IsDoppelGanger2)
+                {
+                    AddCandidate("Object64/song_lava1");
+                }
+                AddCandidate("TileRock05");
+                break;
+            case 12:
+                if (_context.IsKarutan)
+                {
+                    AddCandidate("AlphaTile01");
+                }
+                AddCandidate("TileRock06");
+                AddCandidate("AlphaTile01");
+                break;
+        }
+
+        if (BaseTileTextureCandidates.TryGetValue(index, out var baseCandidates))
+        {
+            foreach (var candidate in baseCandidates)
+            {
+                AddCandidate(candidate);
+            }
+        }
+
+        if (list.Count == 0)
+        {
+            AddCandidate($"ExtTile{index:00}");
+        }
+
+        return list;
     }
 }

@@ -25,11 +25,41 @@ public static class WorldExporter
             textureAtlasRelative = textureFileName;
         }
 
+        string? litTextureRelative = null;
+        if (world.Visual?.LitCompositeTexture is TextureImage lit)
+        {
+            var baseName = Path.GetFileNameWithoutExtension(fullOutputPath) ?? "terrainsummary";
+            var textureFileName = baseName + "_texture_lit.png";
+            var texturePath = string.IsNullOrEmpty(outputDirectory)
+                ? textureFileName
+                : Path.Combine(outputDirectory, textureFileName);
+            lit.SavePng(texturePath);
+            litTextureRelative = textureFileName;
+        }
+
+        string? lightMapRelative = null;
+        if (world.Visual?.LightMap is TextureImage lightMap)
+        {
+            var baseName = Path.GetFileNameWithoutExtension(fullOutputPath) ?? "terrainsummary";
+            var textureFileName = baseName + "_lightmap.png";
+            var texturePath = string.IsNullOrEmpty(outputDirectory)
+                ? textureFileName
+                : Path.Combine(outputDirectory, textureFileName);
+            lightMap.SavePng(texturePath);
+            lightMapRelative = textureFileName;
+        }
+
         var visualPayload = world.Visual is null
             ? null
             : new
             {
                 TextureAtlas = textureAtlasRelative,
+                LitTextureAtlas = litTextureRelative,
+                LightMap = new
+                {
+                    Source = world.Visual.LightMapPath,
+                    Texture = lightMapRelative,
+                },
                 TileTextures = world.Visual.TileTextures.ToDictionary(kv => (int)kv.Key, kv => kv.Value),
                 TileMaterialFlags = world.Visual.TileMaterialFlags.ToDictionary(
                     kv => (int)kv.Key,
@@ -40,6 +70,8 @@ public static class WorldExporter
                     }),
                 world.Visual.MaterialFlagsPerTile,
                 MissingTileIndices = world.Visual.MissingTileIndices,
+                HasWaterTerrain = world.Visual.HasWaterTerrain,
+                SpecialTextures = world.Visual.SpecialTextures.ToDictionary(kv => kv.Key, kv => kv.Value),
             };
 
         var modelsPayload = world.ModelLibrary.Models.ToDictionary(
