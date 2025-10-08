@@ -8,7 +8,7 @@ dados sem executar o cliente completo.
 
 ## Pré-requisitos
 
-* [.NET 6 SDK](https://dotnet.microsoft.com/download/dotnet/6.0) ou superior.
+* [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) ou superior.
 
 ## Compilação
 
@@ -17,15 +17,15 @@ dados sem executar o cliente completo.
 Dentro da raiz do repositório execute:
 
 ```bash
-# Linux/macOS
+# Linux/macOS (CLI)
 dotnet build tools/terreno_visualisado/TerrenoVisualisado.csproj -c Release
 # Interface gráfica WinForms (requer Windows)
 dotnet build tools/terreno_visualisado/TerrenoVisualisado.Gui/TerrenoVisualisado.Gui.csproj -c Release
 
 # Windows (PowerShell ou Prompt) — utilize barras invertidas para evitar que o MSBuild
 # interprete o caminho como uma opção:
-dotnet build tools\terreno_visualisado\TerrenoVisualisado.csproj -c Release
-dotnet build tools\terreno_visualisado\TerrenoVisualisado.Gui\TerrenoVisualisado.Gui.csproj -c Release
+dotnet build "tools\terreno_visualisado\TerrenoVisualisado.csproj" -c Release
+dotnet build "tools\terreno_visualisado\TerrenoVisualisado.Gui\TerrenoVisualisado.Gui.csproj" -c Release
 ```
 
 Caso esteja abrindo o projeto a partir de um diretório com espaços no Windows,
@@ -33,10 +33,21 @@ lembre-se de envolver o caminho entre aspas (`"..."`). Exemplo:
 
 ```powershell
 dotnet build "C:\\Users\\Rafael Mazzoni\\Downloads\\Projeto Unreal Estudos\\Ferramentas GFX\\Main-master\\Main-master\\tools\\terreno_visualisado\\TerrenoVisualisado.csproj" -c Release
+dotnet build "C:\\Users\\Rafael Mazzoni\\Downloads\\Projeto Unreal Estudos\\Ferramentas GFX\\Main-master\\Main-master\\tools\\terreno_visualisado\\TerrenoVisualisado.Gui\\TerrenoVisualisado.Gui.csproj" -c Release
 ```
 
 Antes de compilar pela primeira vez, execute um `dotnet restore` no mesmo
 diretório do comando de build para que as dependências do SDK sejam baixadas.
+
+Se o `dotnet restore` falhar dizendo que não encontrou pacotes como `OpenTK`
+ou `OpenTK.WinForms`, confirme que o feed oficial do NuGet (`nuget.org`) está
+habilitado:
+
+```powershell
+dotnet nuget list source
+# Caso "nuget.org" não apareça, adicione-o:
+dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org
+```
 
 ### Visual Studio 2022+
 
