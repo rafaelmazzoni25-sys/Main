@@ -42,10 +42,11 @@ public sealed class WorldLoader
         var objects = LoadObjects(objectsPath, modelNames, out var version, out var objectMapId);
 
         var resolvedMapId = options.MapId ?? (attributeMapId >= 0 ? attributeMapId : (mappingMapId >= 0 ? mappingMapId : objectMapId));
+        var mapContext = MapContext.ForMapId(resolvedMapId);
         AlignObjectsToTerrain(objects, terrain);
 
         var materialLibrary = new MaterialStateLibrary(worldDirectory, new[] { objectsPath });
-        var textureLibrary = new TextureLibrary(worldDirectory, objectsPath, resolvedMapId);
+        var textureLibrary = new TextureLibrary(worldDirectory, objectsPath, mapContext);
         var tileIndices = new HashSet<byte>();
         foreach (var tile in terrain.Layer1)
         {
@@ -60,6 +61,13 @@ public sealed class WorldLoader
         }
 
         var compositeTexture = textureLibrary.ComposeLayeredTexture(terrain.Layer1, terrain.Layer2, terrain.Alpha);
+        var (lightMap, lightMapPath) = textureLibrary.LoadTerrainLight(mapContext);
+        TextureImage? litComposite = null;
+        if (lightMap is not null)
+        {
+            litComposite = ApplyLightMap(compositeTexture, lightMap);
+        }
+        var specialTextures = textureLibrary.LoadSpecialTextures(mapContext);
         var tileTextures = new Dictionary<byte, string?>(tileIndices.Count);
         var tileMaterials = new Dictionary<byte, MaterialFlags>(tileIndices.Count);
         foreach (var tile in tileIndices)
@@ -74,10 +82,15 @@ public sealed class WorldLoader
         var visual = new TerrainVisualData
         {
             CompositeTexture = compositeTexture,
+            LitCompositeTexture = litComposite,
+            LightMap = lightMap,
+            LightMapPath = lightMapPath,
             TileTextures = tileTextures,
             TileMaterialFlags = tileMaterials,
             MaterialFlagsPerTile = materialFlagsPerTile,
             MissingTileIndices = textureLibrary.MissingIndices.ToArray(),
+            HasWaterTerrain = mapContext.HasWaterTerrain,
+            SpecialTextures = new Dictionary<string, string?>(specialTextures, StringComparer.OrdinalIgnoreCase),
         };
 
         var modelSearchRoots = new List<string>
@@ -152,6 +165,30 @@ public sealed class WorldLoader
             result[i] = (uint)(baseFlags | overlayFlags);
         }
         return result;
+    }
+
+    private static TextureImage ApplyLightMap(TextureImage baseTexture, TextureImage lightMap)
+    {
+        var adjustedLight = lightMap;
+        if (lightMap.Width != baseTexture.Width || lightMap.Height != baseTexture.Height)
+        {
+            adjustedLight = lightMap.Resize(baseTexture.Width, baseTexture.Height);
+        }
+
+        var resultPixels = new byte[baseTexture.Pixels.Length];
+        for (var i = 0; i < baseTexture.Pixels.Length; i += 4)
+        {
+            var lr = adjustedLight.Pixels[i] / 255f;
+            var lg = adjustedLight.Pixels[i + 1] / 255f;
+            var lb = adjustedLight.Pixels[i + 2] / 255f;
+
+            resultPixels[i] = (byte)Math.Clamp((int)Math.Round(baseTexture.Pixels[i] * lr), 0, 255);
+            resultPixels[i + 1] = (byte)Math.Clamp((int)Math.Round(baseTexture.Pixels[i + 1] * lg), 0, 255);
+            resultPixels[i + 2] = (byte)Math.Clamp((int)Math.Round(baseTexture.Pixels[i + 2] * lb), 0, 255);
+            resultPixels[i + 3] = baseTexture.Pixels[i + 3];
+        }
+
+        return new TextureImage(baseTexture.Width, baseTexture.Height, resultPixels);
     }
 
     private static void AlignObjectsToTerrain(List<ObjectInstance> objects, TerrainData terrain)
