@@ -55,10 +55,11 @@ except Exception:  # noqa: BLE001
 try:  # Optional windowing backend
     import pyglet
     from pyglet import gl as pyglet_gl  # noqa: F401  # used for type checking / side-effects
-    from pyglet.window import key as pyglet_key
+    from pyglet.window import key as pyglet_key, mouse as pyglet_mouse
 except Exception:  # noqa: BLE001
     pyglet = None  # type: ignore[assignment]
     pyglet_key = None  # type: ignore[assignment]
+    pyglet_mouse = None  # type: ignore[assignment]
 
 
 def _get_depth_mask(ctx: "moderngl.Context") -> Optional[bool]:
@@ -2337,7 +2338,10 @@ class OpenGLTerrainApp:
         title: str,
         fog_color: Tuple[float, float, float] = (0.25, 0.33, 0.45),
         fog_density: float = 0.00025,
+        scene_focus: str = "terrain",
     ) -> None:
+        if scene_focus not in {"terrain", "full"}:
+            raise ValueError(f"Scene focus inválido: {scene_focus}")
         self.data = data
         self.objects = list(objects)
         self.texture_library = texture_library
@@ -2347,6 +2351,8 @@ class OpenGLTerrainApp:
         self.title = title
         self.fog_color = np.array(fog_color, dtype=np.float32)
         self.fog_density = fog_density
+        self.scene_focus = scene_focus
+        self.focus_terrain_only = scene_focus == "terrain"
         self.window_size = (1280, 720)
         self.ctx: Optional["moderngl.Context"] = None
         self.window: Optional["pyglet.window.Window"] = None
@@ -2359,7 +2365,7 @@ class OpenGLTerrainApp:
         self.skybox_program: Optional["moderngl.Program"] = None
         self.particle_program: Optional["moderngl.Program"] = None
         self.sky_texture: Optional["moderngl.Texture"] = None
-        self.camera: Optional[OrbitCamera] = None
+        self.camera: Optional[FreeCamera] = None
         self._pressed_keys: set[int] = set()
         self._start_time = 0.0
         self._last_frame_time = 0.0
@@ -2379,6 +2385,7 @@ class OpenGLTerrainApp:
         self.emissive_override = np.zeros(3, dtype=np.float32)
         self._default_white_texture: Optional["moderngl.Texture"] = None
         self._default_normal_texture: Optional["moderngl.Texture"] = None
+        self._mouse_captured = False
 
     def _init_programs(self) -> None:
         assert self.ctx is not None
@@ -2643,131 +2650,157 @@ class OpenGLTerrainApp:
         )
         self.object_specular_program = None
 
-        self.sky_program = self.ctx.program(
-            vertex_shader=textwrap.dedent(
-                """
-                #version 330
-                in vec2 in_position;
-                out vec2 v_pos;
-                void main() {
-                    v_pos = in_position;
-                    gl_Position = vec4(in_position, 0.999, 1.0);
-                }
-                """
-            ),
-            fragment_shader=textwrap.dedent(
-                """
-                #version 330
-                in vec2 v_pos;
-                uniform vec3 u_color_top;
-                uniform vec3 u_color_bottom;
-                out vec4 frag_color;
-                void main() {
-                    float t = clamp((v_pos.y + 1.0) * 0.5, 0.0, 1.0);
-                    vec3 color = mix(u_color_bottom, u_color_top, pow(t, 1.6));
-                    frag_color = vec4(color, 1.0);
-                }
-                """
-            ),
-        )
+        if not self.focus_terrain_only:
+            self.sky_program = self.ctx.program(
+                vertex_shader=textwrap.dedent(
+                    """
+                    #version 330
+                    in vec2 in_position;
+                    out vec2 v_pos;
+                    void main() {
+                        v_pos = in_position;
+                        gl_Position = vec4(in_position, 0.999, 1.0);
+                    }
+                    """
+                ),
+                fragment_shader=textwrap.dedent(
+                    """
+                    #version 330
+                    in vec2 v_pos;
+                    uniform vec3 u_color_top;
+                    uniform vec3 u_color_bottom;
+                    out vec4 frag_color;
+                    void main() {
+                        float t = clamp((v_pos.y + 1.0) * 0.5, 0.0, 1.0);
+                        vec3 color = mix(u_color_bottom, u_color_top, pow(t, 1.6));
+                        frag_color = vec4(color, 1.0);
+                    }
+                    """
+                ),
+            )
 
-        self.skybox_program = self.ctx.program(
-            vertex_shader=textwrap.dedent(
-                """
-                #version 330
-                in vec2 in_position;
-                out vec2 v_uv;
-                void main() {
-                    v_uv = in_position * 0.5 + 0.5;
-                    gl_Position = vec4(in_position, 0.999, 1.0);
-                }
-                """
-            ),
-            fragment_shader=textwrap.dedent(
-                """
-                #version 330
-                in vec2 v_uv;
-                uniform sampler2D u_sky;
-                out vec4 frag_color;
-                void main() {
-                    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
-                    frag_color = texture(u_sky, uv);
-                }
-                """
-            ),
-        )
+            self.skybox_program = self.ctx.program(
+                vertex_shader=textwrap.dedent(
+                    """
+                    #version 330
+                    in vec2 in_position;
+                    out vec2 v_uv;
+                    void main() {
+                        v_uv = in_position * 0.5 + 0.5;
+                        gl_Position = vec4(in_position, 0.999, 1.0);
+                    }
+                    """
+                ),
+                fragment_shader=textwrap.dedent(
+                    """
+                    #version 330
+                    in vec2 v_uv;
+                    uniform sampler2D u_sky;
+                    out vec4 frag_color;
+                    void main() {
+                        vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+                        frag_color = texture(u_sky, uv);
+                    }
+                    """
+                ),
+            )
 
-        if self._skybox_vao is not None:
-            try:
-                self._skybox_vao.release()
-            except Exception:  # noqa: BLE001
-                pass
-        if self._sky_gradient_vao is not None:
-            try:
-                self._sky_gradient_vao.release()
-            except Exception:  # noqa: BLE001
-                pass
-        if self._sky_vbo is not None:
-            try:
-                self._sky_vbo.release()
-            except Exception:  # noqa: BLE001
-                pass
-        fullscreen_triangle = np.array(
-            [
-                -1.0,
-                -1.0,
-                3.0,
-                -1.0,
-                -1.0,
-                3.0,
-            ],
-            dtype="f4",
-        )
-        self._sky_vbo = self.ctx.buffer(fullscreen_triangle.tobytes())
-        self._skybox_vao = self.ctx.vertex_array(
-            self.skybox_program, [(self._sky_vbo, "2f", "in_position")]
-        )
-        self._sky_gradient_vao = self.ctx.vertex_array(
-            self.sky_program, [(self._sky_vbo, "2f", "in_position")]
-        )
+            if self._skybox_vao is not None:
+                try:
+                    self._skybox_vao.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            if self._sky_gradient_vao is not None:
+                try:
+                    self._sky_gradient_vao.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            if self._sky_vbo is not None:
+                try:
+                    self._sky_vbo.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            fullscreen_triangle = np.array(
+                [
+                    -1.0,
+                    -1.0,
+                    3.0,
+                    -1.0,
+                    -1.0,
+                    3.0,
+                ],
+                dtype="f4",
+            )
+            self._sky_vbo = self.ctx.buffer(fullscreen_triangle.tobytes())
+            self._skybox_vao = self.ctx.vertex_array(
+                self.skybox_program, [(self._sky_vbo, "2f", "in_position")]
+            )
+            self._sky_gradient_vao = self.ctx.vertex_array(
+                self.sky_program, [(self._sky_vbo, "2f", "in_position")]
+            )
 
-        self.particle_program = self.ctx.program(
-            vertex_shader=textwrap.dedent(
-                """
-                #version 330
-                in vec3 in_position;
-                in vec3 in_velocity;
-                in float in_birth;
-                uniform mat4 u_view;
-                uniform mat4 u_projection;
-                uniform float u_time;
-                out float v_alpha;
-                void main() {
-                    float age = u_time - in_birth;
-                    vec3 pos = in_position + in_velocity * max(age, 0.0);
-                    pos.y += sin(age * 0.8 + pos.x * 0.01) * 50.0;
-                    gl_Position = u_projection * u_view * vec4(pos, 1.0);
-                    gl_PointSize = clamp(6.0 - age * 0.4, 1.5, 6.0);
-                    v_alpha = clamp(1.0 - age * 0.2, 0.0, 1.0);
-                }
-                """
-            ),
-            fragment_shader=textwrap.dedent(
-                """
-                #version 330
-                in float v_alpha;
-                uniform vec3 u_fog_color;
-                out vec4 frag_color;
-                void main() {
-                    float dist = length(gl_PointCoord - vec2(0.5));
-                    float alpha = smoothstep(0.5, 0.0, dist) * v_alpha;
-                    frag_color = vec4(u_fog_color, alpha);
-                }
-                """
-            ),
-        )
+            self.particle_program = self.ctx.program(
+                vertex_shader=textwrap.dedent(
+                    """
+                    #version 330
+                    in vec3 in_position;
+                    in vec3 in_velocity;
+                    in float in_birth;
+                    uniform mat4 u_view;
+                    uniform mat4 u_projection;
+                    uniform float u_time;
+                    out float v_alpha;
+                    void main() {
+                        float age = u_time - in_birth;
+                        vec3 pos = in_position + in_velocity * max(age, 0.0);
+                        pos.y += sin(age * 0.8 + pos.x * 0.01) * 50.0;
+                        gl_Position = u_projection * u_view * vec4(pos, 1.0);
+                        gl_PointSize = clamp(6.0 - age * 0.4, 1.5, 6.0);
+                        v_alpha = clamp(1.0 - age * 0.2, 0.0, 1.0);
+                    }
+                    """
+                ),
+                fragment_shader=textwrap.dedent(
+                    """
+                    #version 330
+                    in float v_alpha;
+                    uniform vec3 u_fog_color;
+                    out vec4 frag_color;
+                    void main() {
+                        float t = clamp(v_alpha, 0.0, 1.0);
+                        vec3 color = mix(u_fog_color, vec3(1.0, 0.85, 0.45), pow(t, 1.5));
+                        frag_color = vec4(color, t);
+                    }
+                    """
+                ),
+            )
+        else:
+            self.sky_program = None
+            self.skybox_program = None
+            self.particle_program = None
+            if self._skybox_vao is not None:
+                try:
+                    self._skybox_vao.release()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._skybox_vao = None
+            if self._sky_gradient_vao is not None:
+                try:
+                    self._sky_gradient_vao.release()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sky_gradient_vao = None
+            if self._sky_vbo is not None:
+                try:
+                    self._sky_vbo.release()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._sky_vbo = None
 
     def _build_particles(self) -> None:
+        if self.focus_terrain_only:
+            self._particle_count = 0
+            return
         assert self.ctx is not None
         if self._particle_vbo is not None:
             try:
@@ -2783,113 +2816,6 @@ class OpenGLTerrainApp:
         self._particle_vao = None
         self._particle_count = 0
         self._update_dynamic_particles(0.0)
-
-    def _infer_light_color(self, state: MaterialState) -> np.ndarray:
-        color = np.array(state.emissive, dtype=np.float32)
-        if float(np.linalg.norm(color)) < 1e-3:
-            if state.water:
-                color += np.array([0.12, 0.18, 0.35], dtype=np.float32)
-            if state.lava:
-                color += np.array([1.0, 0.35, 0.12], dtype=np.float32)
-            if state.additive:
-                color += np.array([0.25, 0.25, 0.25], dtype=np.float32)
-        if float(np.linalg.norm(color)) < 1e-3:
-            return np.zeros(3, dtype=np.float32)
-        return np.clip(color, 0.0, 4.0)
-
-    def _build_static_lights(self) -> None:
-        lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
-        for instance in self.object_instances:
-            if not instance.mesh_renderers:
-                continue
-            accum = np.zeros(3, dtype=np.float32)
-            samples = 0
-            for mesh in instance.mesh_renderers:
-                color = self._infer_light_color(mesh.material_state)
-                if float(np.linalg.norm(color)) < 1e-3:
-                    continue
-                accum += color
-                samples += 1
-            if samples == 0:
-                continue
-            position = instance.model_matrix[:3, 3].astype(np.float32)
-            radius = 1600.0 + samples * 240.0
-            lights.append((position, accum / samples, radius))
-        self.static_point_lights = lights
-
-    def _collect_dynamic_lights(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
-        lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
-        for instance in self.object_instances:
-            if not instance.attachments or not instance.global_matrices:
-                continue
-            bone_matrices = instance.global_matrices
-            model_matrix = instance.model_matrix
-            base_color = np.zeros(3, dtype=np.float32)
-            if instance.mesh_renderers:
-                for mesh in instance.mesh_renderers:
-                    base_color += self._infer_light_color(mesh.material_state)
-                if np.any(base_color):
-                    base_color /= max(len(instance.mesh_renderers), 1)
-            for attachment in instance.attachments:
-                if attachment.bone_index < 0 or attachment.bone_index >= len(bone_matrices):
-                    continue
-                name_lower = attachment.name.lower()
-                if not np.any(attachment.color) and "light" not in name_lower and "lamp" not in name_lower:
-                    continue
-                local = _compose_transform_quaternion(attachment.offset, attachment.rotation_quat)
-                world = model_matrix @ bone_matrices[attachment.bone_index] @ local
-                position = world[:3, 3].astype(np.float32)
-                color = attachment.color.astype(np.float32, copy=True)
-                if float(np.linalg.norm(color)) < 1e-3 and np.any(base_color):
-                    color = base_color.copy()
-                color = np.clip(color, 0.0, 6.0)
-                radius = float(max(attachment.radius, 400.0))
-                lights.append((position, color, radius))
-        return lights[:MAX_POINT_LIGHTS]
-
-    def _update_dynamic_particles(self, time_value: float) -> None:
-        if self.ctx is None or self.particle_program is None:
-            return
-        particles: List[Tuple[np.ndarray, np.ndarray, float]] = []
-        for instance in self.object_instances:
-            if not instance.billboards or not instance.global_matrices:
-                continue
-            bone_matrices = instance.global_matrices
-            model_matrix = instance.model_matrix
-            for billboard in instance.billboards:
-                if billboard.bone_index < 0 or billboard.bone_index >= len(bone_matrices):
-                    continue
-                local = _compose_transform_quaternion(billboard.offset, billboard.rotation_quat)
-                world = model_matrix @ bone_matrices[billboard.bone_index] @ local
-                position = world[:3, 3].astype(np.float32)
-                velocity = billboard.velocity.astype(np.float32, copy=True)
-                particles.append((position, velocity, time_value))
-        if not particles:
-            self._particle_count = 0
-            return
-        count = len(particles)
-        particle_data = np.zeros((count, 7), dtype=np.float32)
-        for idx, (position, velocity, birth) in enumerate(particles):
-            particle_data[idx, 0:3] = position
-            particle_data[idx, 3:6] = velocity
-            particle_data[idx, 6] = birth
-        buffer_bytes = particle_data.astype("f4").tobytes()
-        if self._particle_vbo is None or self._particle_vbo.size != len(buffer_bytes):
-            if self._particle_vbo is not None:
-                try:
-                    self._particle_vbo.release()
-                except Exception:  # noqa: BLE001
-                    pass
-            self._particle_vbo = self.ctx.buffer(buffer_bytes)
-            self._particle_vao = self.ctx.vertex_array(
-                self.particle_program,
-                [
-                    (self._particle_vbo, "3f 3f 1f", "in_position", "in_velocity", "in_birth"),
-                ],
-            )
-        else:
-            self._particle_vbo.write(buffer_bytes)
-        self._particle_count = count
 
     def _find_sky_image(self) -> Optional[np.ndarray]:
         search_roots = getattr(self.texture_library, "search_roots", [])
@@ -2921,7 +2847,8 @@ class OpenGLTerrainApp:
         return None
 
     def _initialize_sky_texture(self) -> None:
-        if self.ctx is None:
+        if self.ctx is None or self.focus_terrain_only:
+            self.sky_texture = None
             return
         image = self._find_sky_image()
         if image is None:
@@ -2980,26 +2907,11 @@ class OpenGLTerrainApp:
                 instance.global_matrices = animation_player.global_matrices()
             elif model.bones:
                 instance.global_matrices = [bone.rest_matrix.astype(np.float32) for bone in model.bones]
+            if self.focus_terrain_only:
+                instance.attachments = []
+                instance.billboards = []
             instances.append(instance)
         return instances
-
-    def _setup(self) -> None:
-        if moderngl is None or pyglet is None:
-            raise RuntimeError("O renderer OpenGL requer as dependências 'moderngl' e 'pyglet'.")
-        config = None
-        if pyglet:
-            try:
-                config = pyglet.gl.Config(sample_buffers=1, samples=4, depth_size=24, double_buffer=True)
-            except Exception:  # noqa: BLE001
-                config = None
-        self.window = pyglet.window.Window(
-            width=self.window_size[0],
-            height=self.window_size[1],
-            caption=self.title,
-            resizable=True,
-            config=config,
-            visible=False,
-        )
         try:
             self.window.switch_to()
         except Exception:  # noqa: BLE001
@@ -3044,11 +2956,18 @@ class OpenGLTerrainApp:
             ],
             dtype=np.float32,
         )
-        self.camera = OrbitCamera(center)
+        extent = (TERRAIN_SIZE - 1) * TERRAIN_SCALE
+        start = center + np.array([-0.25 * extent, 0.2 * extent, 0.28 * extent], dtype=np.float32)
+        self.camera = FreeCamera.from_look_at(start, center)
         self._start_time = time.perf_counter()
         self._last_frame_time = self._start_time
         self.window.set_visible(True)
         self._bind_events()
+        print(
+            "Controles: W/A/S/D movem, Q/E ou Ctrl/Espaço ajustam altitude,"
+            " Shift acelera. Segure o botão direito do mouse para mirar livremente e"
+            " use a rolagem para ajustar a velocidade de voo."
+        )
 
     def _bind_events(self) -> None:
         assert self.window is not None
@@ -3059,11 +2978,32 @@ class OpenGLTerrainApp:
 
         @self.window.event
         def on_close() -> None:  # noqa: ANN001
+            if self._mouse_captured:
+                try:
+                    self.window.set_exclusive_mouse(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._mouse_captured = False
             pyglet.app.exit()
+
+        @self.window.event
+        def on_deactivate() -> None:  # noqa: ANN001
+            if self._mouse_captured:
+                try:
+                    self.window.set_exclusive_mouse(False)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._mouse_captured = False
 
         @self.window.event
         def on_key_press(symbol: int, _modifiers: int) -> None:
             if symbol == pyglet_key.ESCAPE:
+                if self._mouse_captured:
+                    try:
+                        self.window.set_exclusive_mouse(False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._mouse_captured = False
                 pyglet.app.exit()
                 return
             self._pressed_keys.add(symbol)
@@ -3073,18 +3013,50 @@ class OpenGLTerrainApp:
             if symbol in self._pressed_keys:
                 self._pressed_keys.remove(symbol)
 
+        if pyglet_mouse is not None:
+
+            @self.window.event
+            def on_mouse_press(_x: int, _y: int, button: int, _modifiers: int) -> None:
+                if button == pyglet_mouse.RIGHT:
+                    try:
+                        self.window.set_exclusive_mouse(True)
+                    except Exception:  # noqa: BLE001
+                        return
+                    self._mouse_captured = True
+
+            @self.window.event
+            def on_mouse_release(_x: int, _y: int, button: int, _modifiers: int) -> None:
+                if button == pyglet_mouse.RIGHT and self._mouse_captured:
+                    try:
+                        self.window.set_exclusive_mouse(False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._mouse_captured = False
+
+        @self.window.event
+        def on_mouse_motion(_x: int, _y: int, dx: float, dy: float) -> None:
+            if self._mouse_captured and self.camera:
+                self.camera.look(dx, dy)
+
+        @self.window.event
+        def on_mouse_drag(_x: int, _y: int, dx: float, dy: float, _buttons: int, _modifiers: int) -> None:
+            if self._mouse_captured and self.camera:
+                self.camera.look(dx, dy)
+
         @self.window.event
         def on_mouse_scroll(_x: int, _y: int, _dx: float, dy: float) -> None:
             if self.camera:
                 self.camera.zoom(-dy * 400.0)
 
-        def _update(dt: float) -> None:
-            if self.camera:
-                self.camera.update(self._pressed_keys, dt)
+        def _tick(_dt: float) -> None:
+            if self.window is not None:
+                self.window.invalid = True
 
-        pyglet.clock.schedule_interval(_update, 1 / 60.0)
+        pyglet.clock.schedule_interval(_tick, 1 / 120.0)
 
     def _render_sky(self, time_value: float) -> None:
+        if self.focus_terrain_only:
+            return
         assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
         previous_depth_mask = _get_depth_mask(self.ctx)
@@ -3113,7 +3085,12 @@ class OpenGLTerrainApp:
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
-        if self._particle_vbo is None or self._particle_count == 0 or self._particle_vao is None:
+        if (
+            self.focus_terrain_only
+            or self._particle_vbo is None
+            or self._particle_count == 0
+            or self._particle_vao is None
+        ):
             return
         assert self.ctx is not None and self.particle_program is not None
         self.ctx.enable(moderngl.BLEND)
@@ -3133,6 +3110,7 @@ class OpenGLTerrainApp:
             delta_time = 1.0 / 60.0
         else:
             delta_time = current_time - self._last_frame_time
+        delta_time = min(delta_time, 0.25)
         self._last_frame_time = current_time
         time_value = current_time - self._start_time
         if self.window is not None:
@@ -3141,6 +3119,7 @@ class OpenGLTerrainApp:
             width, height = self.window_size
         aspect = width / float(max(height, 1))
         projection = _perspective_matrix(60.0, aspect, 10.0, 60000.0)
+        self.camera.update(self._pressed_keys, delta_time)
         view = self.camera.view_matrix()
         eye = self.camera.position
         for instance in self.object_instances:
@@ -3155,8 +3134,12 @@ class OpenGLTerrainApp:
                 pose = instance.global_matrices
                 for renderer in instance.mesh_renderers:
                     renderer.update_pose(pose)
-        self.dynamic_point_lights = self._collect_dynamic_lights()
-        self._update_dynamic_particles(time_value)
+        if self.focus_terrain_only:
+            self.dynamic_point_lights = []
+            self._particle_count = 0
+        else:
+            self.dynamic_point_lights = self._collect_dynamic_lights()
+            self._update_dynamic_particles(time_value)
         point_lights = (self.dynamic_point_lights + self.static_point_lights)[:MAX_POINT_LIGHTS]
         point_count = len(point_lights)
         point_positions = np.zeros((MAX_POINT_LIGHTS, 3), dtype=np.float32)
@@ -3169,7 +3152,8 @@ class OpenGLTerrainApp:
         dir_light = _normalize(self.directional_light_dir)
         self.ctx.viewport = (0, 0, width, height)
         self.ctx.screen.clear(*self.fog_color.tolist(), 1.0)
-        self._render_sky(time_value)
+        if not self.focus_terrain_only:
+            self._render_sky(time_value)
 
         terrain = self.terrain
         assert terrain is not None
@@ -3253,7 +3237,8 @@ class OpenGLTerrainApp:
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
 
-        self._render_particles(view, projection, time_value)
+        if not self.focus_terrain_only:
+            self._render_particles(view, projection, time_value)
 
         if self.window is not None:
             self.window.flip()
@@ -3460,6 +3445,120 @@ def _look_at(eye: np.ndarray, target: np.ndarray, up: np.ndarray) -> np.ndarray:
     return matrix
 
 
+class FreeCamera:
+    def __init__(
+        self,
+        position: np.ndarray,
+        *,
+        yaw: float = math.radians(135.0),
+        pitch: float = math.radians(-20.0),
+        move_speed: float = 1200.0,
+        sprint_multiplier: float = 4.0,
+        mouse_sensitivity: float = 0.0025,
+    ) -> None:
+        self._position = position.astype(np.float32)
+        self.yaw = yaw
+        self.pitch = pitch
+        self.move_speed = move_speed
+        self.sprint_multiplier = sprint_multiplier
+        self.mouse_sensitivity = mouse_sensitivity
+        self.min_speed = 100.0
+        self.max_speed = 20000.0
+        self.max_pitch = math.radians(89.0)
+        self.velocity = np.zeros(3, dtype=np.float32)
+        self._acceleration = 12.0
+        self._damping = 0.15
+
+    @property
+    def position(self) -> np.ndarray:
+        return self._position
+
+    @classmethod
+    def from_look_at(
+        cls,
+        position: np.ndarray,
+        target: np.ndarray,
+        **kwargs: object,
+    ) -> "FreeCamera":
+        position = position.astype(np.float32)
+        target = target.astype(np.float32)
+        forward = _normalize(target - position)
+        yaw = math.atan2(forward[2], forward[0])
+        pitch = math.asin(float(np.clip(forward[1], -0.99999, 0.99999)))
+        return cls(position, yaw=yaw, pitch=pitch, **kwargs)
+
+    def direction(self) -> np.ndarray:
+        cos_pitch = math.cos(self.pitch)
+        sin_pitch = math.sin(self.pitch)
+        cos_yaw = math.cos(self.yaw)
+        sin_yaw = math.sin(self.yaw)
+        return np.array(
+            [
+                cos_pitch * cos_yaw,
+                sin_pitch,
+                cos_pitch * sin_yaw,
+            ],
+            dtype=np.float32,
+        )
+
+    def look(self, dx: float, dy: float) -> None:
+        self.yaw += dx * self.mouse_sensitivity
+        self.pitch -= dy * self.mouse_sensitivity
+        self.pitch = float(np.clip(self.pitch, -self.max_pitch, self.max_pitch))
+
+    def adjust_speed(self, factor: float) -> None:
+        self.move_speed = float(np.clip(self.move_speed * factor, self.min_speed, self.max_speed))
+
+    def zoom(self, delta: float) -> None:
+        if delta == 0.0:
+            return
+        factor = 1.0 + abs(delta) / 4000.0
+        if delta > 0:
+            self.adjust_speed(factor)
+        else:
+            self.adjust_speed(1.0 / factor)
+
+    def update(self, pressed: Sequence[int], dt: float) -> None:
+        if dt <= 0.0:
+            return
+        forward = _normalize(self.direction())
+        up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(forward, up)
+        if np.linalg.norm(right) < 1e-5:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            right = _normalize(right)
+        move = np.zeros(3, dtype=np.float32)
+        if pyglet_key:
+            if pyglet_key.W in pressed:
+                move += forward
+            if pyglet_key.S in pressed:
+                move -= forward
+            if pyglet_key.A in pressed:
+                move -= right
+            if pyglet_key.D in pressed:
+                move += right
+            if pyglet_key.Q in pressed or getattr(pyglet_key, "LCTRL", None) in pressed:
+                move -= up
+            if pyglet_key.E in pressed or getattr(pyglet_key, "SPACE", None) in pressed:
+                move += up
+        if np.linalg.norm(move) > 0.0:
+            move = _normalize(move)
+        target_velocity = move * self.move_speed
+        if pyglet_key:
+            if getattr(pyglet_key, "LSHIFT", None) in pressed or getattr(pyglet_key, "RSHIFT", None) in pressed:
+                target_velocity *= self.sprint_multiplier
+        lerp = float(np.clip(self._acceleration * dt, 0.0, 1.0))
+        self.velocity = self.velocity * (1.0 - lerp) + target_velocity * lerp
+        if np.linalg.norm(move) == 0.0:
+            self.velocity *= max(0.0, 1.0 - self._damping)
+        self._position += self.velocity * dt
+
+    def view_matrix(self) -> np.ndarray:
+        target = self.position + self.direction()
+        return _look_at(self.position, target, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+
+
 class OrbitCamera:
     def __init__(self, target: np.ndarray, *, distance: float = 9000.0) -> None:
         self.target = target.astype(np.float32)
@@ -3618,8 +3717,14 @@ def render_scene(
     bmd_library: Optional[BMDLibrary] = None,
     fog_color: Optional[Tuple[float, float, float]] = None,
     fog_density: Optional[float] = None,
+    scene_focus: str = "terrain",
 ) -> None:
+    valid_focus = {"terrain", "full"}
+    if scene_focus not in valid_focus:
+        raise ValueError(f"Scene focus inválido: {scene_focus}. Opções: {sorted(valid_focus)}")
     if view_mode == "2d":
+        if scene_focus == "terrain":
+            raise ValueError("Scene focus 'terrain' requer visualização 3D.")
         matrix, cmap_name = _overlay_matrix(data, overlay)
         fig, ax = plt.subplots(figsize=(9, 8))
         image = ax.imshow(matrix, origin="lower", cmap=cmap_name)
@@ -3662,6 +3767,7 @@ def render_scene(
             title=title or "Visualização OpenGL",
             fog_color=fog_color or (0.25, 0.33, 0.45),
             fog_density=fog_density or 0.00025,
+            scene_focus=scene_focus,
         )
         app.run(show=show, output=output)
         return
@@ -3681,11 +3787,12 @@ def render_scene(
         cmap = plt.get_cmap(cmap_name)
         normalized = _normalize_for_colormap(matrix)
         base_colors = cmap(normalized)
-        facecolors = base_colors[:-1, :-1, :]
-        shading = LightSource(azdeg=315, altdeg=55).shade(
-            render_heights, vert_exag=1.0, fraction=0.6
+        facecolors = base_colors[:-1, :-1, :].copy()
+        light_source = LightSource(azdeg=315, altdeg=55)
+        shaded_rgb = light_source.shade_rgb(
+            facecolors[..., :3], render_heights[:-1, :-1], fraction=0.6
         )
-        facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
+        facecolors[..., :3] = shaded_rgb
         facecolors = np.clip(facecolors, 0.0, 1.0)
 
     ax.plot_surface(
@@ -3766,6 +3873,9 @@ def render_scene(
         ax.set_ylabel("Y (tiles)")
         ax.set_zlabel("Altura")
         ax.view_init(elev=60, azim=45)
+        if scene_focus == "terrain":
+            ax.set_proj_type("persp")
+            ax.grid(False)
         if title:
             ax.set_title(title)
         plt.tight_layout()
@@ -4498,6 +4608,7 @@ def run_viewer(
     enable_object_edit: bool = False,
     view_mode: str = "3d",
     overlay: str = "textures",
+    scene_focus: str = "terrain",
     include_filters: Optional[Sequence[str]] = None,
     exclude_filters: Optional[Sequence[str]] = None,
     export_json: Optional[Path] = None,
@@ -4507,6 +4618,9 @@ def run_viewer(
     fog_density: Optional[float] = None,
     fog_color: Optional[Tuple[float, float, float]] = None,
 ) -> TerrainLoadResult:
+    if scene_focus not in {"terrain", "full"}:
+        raise ValueError("Scene focus inválido. Use 'terrain' ou 'full'.")
+
     result = load_world_data(
         world_path,
         map_id=map_id,
@@ -4604,6 +4718,7 @@ def run_viewer(
                     bmd_library=bmd_library,
                     fog_density=fog_density,
                     fog_color=fog_color,
+                    scene_focus=scene_focus,
                 )
                 render_success = True
             except Exception as exc:  # noqa: BLE001
@@ -4638,6 +4753,7 @@ def run_viewer(
                 bmd_library=None,
                 fog_density=fog_density,
                 fog_color=fog_color,
+                scene_focus=scene_focus,
             )
             render_success = True
 
@@ -4728,6 +4844,7 @@ class TerrainViewerGUI:
         self.edit_objects_var = tk.BooleanVar()
         self.view_mode_var = tk.StringVar(value="3D")
         self.overlay_var = tk.StringVar(value="Texturas")
+        self.scene_focus_var = tk.StringVar(value="Somente terreno e instâncias")
         self.include_filter_var = tk.StringVar()
         self.exclude_filter_var = tk.StringVar()
         self.texture_detail_var = tk.StringVar(value="2")
@@ -4745,6 +4862,10 @@ class TerrainViewerGUI:
             "Texturas": "textures",
             "Altura": "height",
             "Atributos": "attributes",
+        }
+        self.scene_focus_map = {
+            "Somente terreno e instâncias": "terrain",
+            "Cena completa": "full",
         }
         self.renderer_map = {"OpenGL": "opengl", "Matplotlib": "matplotlib"}
         if enum_path and enum_path.exists():
@@ -4790,6 +4911,7 @@ class TerrainViewerGUI:
         object_dir: Optional[Path],
         view_mode: str,
         overlay: str,
+        scene_focus: str,
         include: Optional[str],
         exclude: Optional[str],
         texture_detail: int,
@@ -4806,6 +4928,7 @@ class TerrainViewerGUI:
             "1" if self.extended_height_var.get() else "0",
             view_mode,
             overlay,
+            scene_focus,
             include or "",
             exclude or "",
             str(texture_detail),
@@ -4827,6 +4950,7 @@ class TerrainViewerGUI:
         Optional[Path],
         str,
         str,
+        str,
         Optional[str],
         Optional[str],
         int,
@@ -4844,6 +4968,7 @@ class TerrainViewerGUI:
         object_dir = Path(self.object_dir_var.get()) if self.object_dir_var.get() else None
         view_mode = self._current_view_mode()
         overlay = self._current_overlay()
+        scene_focus = self.scene_focus_map.get(self.scene_focus_var.get(), "terrain")
         include, exclude = self._current_filter_values()
         texture_detail = _safe_int(self.texture_detail_var.get()) or 2
         if texture_detail < 1:
@@ -4859,6 +4984,7 @@ class TerrainViewerGUI:
             object_dir,
             view_mode,
             overlay,
+            scene_focus,
             include,
             exclude,
             texture_detail,
@@ -4874,6 +5000,7 @@ class TerrainViewerGUI:
             object_dir,
             view_mode,
             overlay,
+            scene_focus,
             include,
             exclude,
             texture_detail,
@@ -4951,28 +5078,35 @@ class TerrainViewerGUI:
             *self.renderer_map.keys(),
         ).grid(row=2, column=7, sticky="ew")
 
-        tk.Label(options_frame, text="Névoa densidade:").grid(row=3, column=0, sticky="w")
+        tk.Label(options_frame, text="Foco da cena:").grid(row=3, column=0, sticky="w")
+        tk.OptionMenu(
+            options_frame,
+            self.scene_focus_var,
+            *self.scene_focus_map.keys(),
+        ).grid(row=3, column=1, sticky="ew")
+
+        tk.Label(options_frame, text="Névoa densidade:").grid(row=4, column=0, sticky="w")
         tk.Entry(options_frame, textvariable=self.fog_density_var, width=10).grid(
-            row=3, column=1, sticky="w"
+            row=4, column=1, sticky="w"
         )
 
-        tk.Label(options_frame, text="Cor névoa (R,G,B):").grid(row=3, column=2, sticky="w")
+        tk.Label(options_frame, text="Cor névoa (R,G,B):").grid(row=4, column=2, sticky="w")
         tk.Entry(options_frame, textvariable=self.fog_color_var, width=20).grid(
-            row=3, column=3, columnspan=3, sticky="ew"
+            row=4, column=3, columnspan=3, sticky="ew"
         )
 
-        tk.Label(options_frame, text="Mostrar apenas (ID/nome):").grid(row=4, column=0, sticky="w")
-        tk.Entry(options_frame, textvariable=self.include_filter_var, width=20).grid(row=4, column=1, sticky="ew")
+        tk.Label(options_frame, text="Mostrar apenas (ID/nome):").grid(row=5, column=0, sticky="w")
+        tk.Entry(options_frame, textvariable=self.include_filter_var, width=20).grid(row=5, column=1, sticky="ew")
 
-        tk.Label(options_frame, text="Ocultar (ID/nome):").grid(row=4, column=2, sticky="w")
-        tk.Entry(options_frame, textvariable=self.exclude_filter_var, width=20).grid(row=4, column=3, sticky="ew")
+        tk.Label(options_frame, text="Ocultar (ID/nome):").grid(row=5, column=2, sticky="w")
+        tk.Entry(options_frame, textvariable=self.exclude_filter_var, width=20).grid(row=5, column=3, sticky="ew")
 
         self.edit_checkbox = tk.Checkbutton(
             options_frame,
             text="Permitir mover objetos (janela interativa)",
             variable=self.edit_objects_var,
         )
-        self.edit_checkbox.grid(row=5, column=0, columnspan=4, sticky="w")
+        self.edit_checkbox.grid(row=6, column=0, columnspan=4, sticky="w")
 
         options_frame.columnconfigure(1, weight=1)
         options_frame.columnconfigure(3, weight=1)
@@ -5059,6 +5193,7 @@ class TerrainViewerGUI:
                 object_dir,
                 view_mode,
                 overlay,
+                scene_focus,
                 _,
                 _,
                 texture_detail,
@@ -5116,6 +5251,7 @@ class TerrainViewerGUI:
                     enable_object_edit=False,
                     view_mode=view_mode,
                     overlay=overlay,
+                    scene_focus=scene_focus,
                     texture_library=texture_library,
                     material_library=material_library,
                     renderer=renderer,
@@ -5234,6 +5370,7 @@ class TerrainViewerGUI:
             object_dir,
             view_mode,
             overlay,
+            scene_focus,
             include,
             exclude,
             texture_detail,
@@ -5262,6 +5399,7 @@ class TerrainViewerGUI:
             enable_object_edit=self.edit_objects_var.get(),
             view_mode=view_mode,
             overlay=overlay,
+            scene_focus=scene_focus,
             renderer=renderer,
             include_filters=include_filters,
             exclude_filters=exclude_filters,
@@ -5392,6 +5530,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         help="Motor de renderização: Matplotlib clássico ou OpenGL com texturas reais.",
     )
     parser.add_argument(
+        "--scene-focus",
+        choices=["terrain", "full"],
+        default="terrain",
+        help="Define se a visualização prioriza apenas terreno e instâncias ou a cena completa.",
+    )
+    parser.add_argument(
         "--texture-detail",
         type=int,
         default=2,
@@ -5448,6 +5592,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         view_mode=args.view_mode,
         overlay=args.overlay,
         renderer=args.renderer,
+        scene_focus=args.scene_focus,
         include_filters=args.include_filters,
         exclude_filters=args.exclude_filters,
         export_json=args.export_json,
