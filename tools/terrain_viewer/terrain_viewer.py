@@ -58,6 +58,7 @@ try:  # Optional windowing backend
     from pyglet.window import key as pyglet_key, mouse as pyglet_mouse
 except Exception:  # noqa: BLE001
     pyglet = None  # type: ignore[assignment]
+    pyglet_gl = None  # type: ignore[assignment]
     pyglet_key = None  # type: ignore[assignment]
     pyglet_mouse = None  # type: ignore[assignment]
 
@@ -2912,6 +2913,58 @@ class OpenGLTerrainApp:
                 instance.billboards = []
             instances.append(instance)
         return instances
+
+    def _setup(self) -> None:
+        if moderngl is None or pyglet is None:
+            raise RuntimeError(
+                "Renderer OpenGL indisponível: é necessário ter 'moderngl' e 'pyglet' instalados."
+            )
+
+        if self.window is None:
+            width, height = self.window_size
+            last_error: Optional[Exception] = None
+            created_window: Optional["pyglet.window.Window"] = None
+            config_candidates: List[Optional["pyglet.gl.Config"]] = []
+            if pyglet_gl is not None:
+                for samples in (8, 4, 2, 0):
+                    kwargs = {"double_buffer": True, "depth_size": 24}
+                    if samples > 0:
+                        kwargs.update({"sample_buffers": 1, "samples": samples})
+                    try:
+                        config_candidates.append(pyglet_gl.Config(**kwargs))
+                    except Exception:  # noqa: BLE001
+                        continue
+            config_candidates.append(None)
+
+            for config in config_candidates:
+                try:
+                    created_window = pyglet.window.Window(
+                        width=width,
+                        height=height,
+                        caption=self.title,
+                        resizable=True,
+                        visible=False,
+                        config=config,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    continue
+                else:
+                    break
+
+            if created_window is None:
+                if last_error is None:
+                    raise RuntimeError("Não foi possível criar a janela OpenGL.")
+                raise RuntimeError("Não foi possível criar a janela OpenGL.") from last_error
+
+            self.window = created_window
+            try:
+                framebuffer_size = self.window.get_framebuffer_size()
+            except Exception:  # noqa: BLE001
+                framebuffer_size = self.window_size
+            if framebuffer_size and framebuffer_size[0] > 0 and framebuffer_size[1] > 0:
+                self.window_size = (int(framebuffer_size[0]), int(framebuffer_size[1]))
+
         try:
             self.window.switch_to()
         except Exception:  # noqa: BLE001
