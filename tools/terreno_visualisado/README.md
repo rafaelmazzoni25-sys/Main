@@ -49,6 +49,10 @@ dotnet nuget list source
 dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org
 ```
 
+O arquivo `nuget.config` incluído na pasta da ferramenta já define o feed
+oficial do NuGet como fonte padrão. Use os comandos acima apenas se sua
+instalação do .NET ignorar esse arquivo ou ainda não reconhecer o `nuget.org`.
+
 ### Visual Studio 2022+
 
 Foi adicionada a solução `TerrenoVisualisado.sln` dentro da pasta da
