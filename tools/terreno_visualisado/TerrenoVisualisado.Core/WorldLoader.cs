@@ -8,7 +8,7 @@ namespace TerrenoVisualisado.Core;
 public sealed class WorldLoader
 {
     public const int TerrainSize = 256;
-    private const float TerrainScale = 100.0f;
+    public const float TerrainScale = 100.0f;
     private const float DefaultClassicHeightScale = 1.5f;
     private const float MinHeightBias = -500.0f;
 

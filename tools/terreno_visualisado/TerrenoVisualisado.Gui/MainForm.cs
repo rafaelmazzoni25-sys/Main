@@ -21,7 +21,9 @@ public class MainForm : Form
     private readonly Button _exportButton;
     private readonly ComboBox _previewMode;
     private readonly CheckBox _overlayObjects;
-    private readonly PictureBox _preview;
+    private readonly TabControl _previewTabs;
+    private readonly PictureBox _preview2D;
+    private readonly TerrainGlViewer _preview3D;
     private readonly TextBox _summary;
     private readonly ListView _objectList;
 
@@ -152,13 +154,24 @@ public class MainForm : Form
         };
         layout.Controls.Add(split, 0, 2);
 
-        _preview = new PictureBox
+        _previewTabs = new TabControl { Dock = DockStyle.Fill };
+        _preview2D = new PictureBox
         {
             Dock = DockStyle.Fill,
             SizeMode = PictureBoxSizeMode.Zoom,
             BackColor = System.Drawing.Color.Black,
         };
-        split.Panel1.Controls.Add(_preview);
+        var preview2DPage = new TabPage("Pré-visualização 2D") { Padding = new Padding(3) };
+        preview2DPage.Controls.Add(_preview2D);
+
+        _preview3D = new TerrainGlViewer();
+        var preview3DPage = new TabPage("Visualização 3D") { Padding = new Padding(3) };
+        preview3DPage.Controls.Add(_preview3D);
+
+        _previewTabs.TabPages.Add(preview2DPage);
+        _previewTabs.TabPages.Add(preview3DPage);
+
+        split.Panel1.Controls.Add(_previewTabs);
 
         var tabs = new TabControl { Dock = DockStyle.Fill };
         split.Panel2.Controls.Add(tabs);
@@ -198,7 +211,7 @@ public class MainForm : Form
     {
         if (disposing)
         {
-            _preview.Image?.Dispose();
+            _preview2D.Image?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -245,9 +258,11 @@ public class MainForm : Form
             _exportButton.Enabled = true;
             UpdateSummary();
             RenderPreview();
+            _preview3D.DisplayWorld(_world);
         }
         catch (Exception ex)
         {
+            _preview3D.DisplayWorld(null);
             MessageBox.Show(this, ex.Message, "Erro ao carregar", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -351,8 +366,9 @@ public class MainForm : Form
     {
         if (_world is null)
         {
-            _preview.Image?.Dispose();
-            _preview.Image = null;
+            _preview2D.Image?.Dispose();
+            _preview2D.Image = null;
+            _preview3D.DisplayWorld(null);
             return;
         }
 
@@ -361,8 +377,8 @@ public class MainForm : Form
             return;
         }
 
-        _preview.Image?.Dispose();
-        _preview.Image = TerrainPreviewRenderer.Render(_world, item.Mode, _overlayObjects.Checked);
+        _preview2D.Image?.Dispose();
+        _preview2D.Image = TerrainPreviewRenderer.Render(_world, item.Mode, _overlayObjects.Checked);
     }
 
     private sealed record PreviewItem(string Text, PreviewMode Mode)

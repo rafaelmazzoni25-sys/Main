@@ -53,3 +53,10 @@ atributos e alfa, além de sobrepor os objetos estáticos nas posições correta
 A tela principal permite selecionar as pastas do mundo e dos objetos, informar
 um `EnumModelType.eum` opcional e ajustar escala/ID do mapa. Após o carregamento
 é possível exportar o mesmo JSON gerado pelo utilitário de linha de comando.
+
+Além do preview 2D tradicional, a interface inclui uma aba **Visualização 3D**
+com um renderizador OpenGL. O heightmap é convertido para uma malha completa,
+as camadas de tiles são mescladas em um atlas idêntico ao cliente e o resultado
+é desenhado com iluminação difusa e câmera orbitando livremente (botão esquerdo
+para orbitar, direito para pan e roda para zoom), permitindo inspecionar o
+terreno de forma fiel.
