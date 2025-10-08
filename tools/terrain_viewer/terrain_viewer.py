@@ -60,6 +60,45 @@ except Exception:  # noqa: BLE001
     pyglet = None  # type: ignore[assignment]
     pyglet_key = None  # type: ignore[assignment]
 
+
+def _get_depth_mask(ctx: "moderngl.Context") -> Optional[bool]:
+    if moderngl is None:
+        return None
+    targets = [ctx, getattr(ctx, "screen", None)]
+    for target in targets:
+        if target is None:
+            continue
+        try:
+            mask = getattr(target, "depth_mask")
+        except AttributeError:
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(mask, bool):
+            return mask
+        if isinstance(mask, (int, np.integer)):
+            return bool(mask)
+    return None
+
+
+def _set_depth_mask(ctx: "moderngl.Context", value: bool) -> bool:
+    if moderngl is None:
+        return False
+    updated = False
+    targets = [ctx, getattr(ctx, "screen", None)]
+    for target in targets:
+        if target is None:
+            continue
+        try:
+            setattr(target, "depth_mask", bool(value))
+        except AttributeError:
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+        else:
+            updated = True
+    return updated
+
 TERRAIN_SIZE = 256
 TERRAIN_SCALE = 100.0
 BUX_CODE = (0xFC, 0xCF, 0xAB)
@@ -2052,7 +2091,7 @@ class _BMDMeshRenderer:
             ctx.blend_func = (src, dst)
         else:
             ctx.disable(moderngl.BLEND)
-        ctx.depth_mask = state.depth_write
+        _set_depth_mask(ctx, state.depth_write)
         if state.depth_test:
             ctx.enable(moderngl.DEPTH_TEST)
         else:
@@ -2969,7 +3008,8 @@ class OpenGLTerrainApp:
             # criação do contexto trate o erro normalmente.
             pass
         self.ctx = moderngl.create_context()
-        self.ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.CULL_FACE)
         white_pixel = bytes([255, 255, 255, 255])
         self._default_white_texture = self.ctx.texture((1, 1), 4, white_pixel)
         self._default_white_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
@@ -3047,9 +3087,9 @@ class OpenGLTerrainApp:
     def _render_sky(self, time_value: float) -> None:
         assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
-        previous_depth_mask = self.ctx.depth_mask
-        if previous_depth_mask:
-            self.ctx.depth_mask = False
+        previous_depth_mask = _get_depth_mask(self.ctx)
+        if previous_depth_mask is not None:
+            _set_depth_mask(self.ctx, False)
         self.ctx.screen.use()
         if (
             self.sky_texture is not None
@@ -3068,8 +3108,8 @@ class OpenGLTerrainApp:
             self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
             self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
             self._sky_gradient_vao.render(mode=moderngl.TRIANGLES, vertices=3)
-        if previous_depth_mask:
-            self.ctx.depth_mask = True
+        if previous_depth_mask is not None:
+            _set_depth_mask(self.ctx, previous_depth_mask)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
@@ -3209,7 +3249,7 @@ class OpenGLTerrainApp:
                 mesh.vao_diffuse.render()
         self.ctx.disable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-        self.ctx.depth_mask = True
+        _set_depth_mask(self.ctx, True)
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
 
