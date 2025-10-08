@@ -126,13 +126,13 @@ internal static class Program
 
     private sealed record CliOptions
     {
-        public string? WorldDirectory { get; init; }
-        public string? ObjectDirectory { get; init; }
-        public int? MapId { get; init; }
-        public string? EnumPath { get; init; }
-        public float? HeightScale { get; init; }
-        public bool ForceExtendedHeight { get; init; }
-        public string? OutputPath { get; init; }
+        public string? WorldDirectory { get; set; }
+        public string? ObjectDirectory { get; set; }
+        public int? MapId { get; set; }
+        public string? EnumPath { get; set; }
+        public float? HeightScale { get; set; }
+        public bool ForceExtendedHeight { get; set; }
+        public string? OutputPath { get; set; }
 
         public static CliOptions Parse(string[] args)
         {
