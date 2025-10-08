@@ -129,7 +129,6 @@ public static class TerrainMeshBuilder
 
     private static Vector3 ComputeNormal(TerrainData terrain, int x, int y)
     {
-        var size = WorldLoader.TerrainSize;
         var hL = SampleHeight(terrain, x - 1, y);
         var hR = SampleHeight(terrain, x + 1, y);
         var hD = SampleHeight(terrain, x, y + 1);
