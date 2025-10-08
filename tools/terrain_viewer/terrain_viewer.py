@@ -1098,14 +1098,10 @@ def _merge_texture_layers(
     modes = blend[..., 1]
     mix_mask = (modes > 0.5) & (modes < 1.5)
     if np.any(mix_mask):
-        mix_mask_expanded = mix_mask[..., None]
-        alpha_expanded = alpha[..., None]
-        base_vals = result[mix_mask_expanded]
-        overlay_vals = overlay[mix_mask_expanded]
-        alpha_vals = alpha_expanded[mix_mask_expanded]
-        result[mix_mask_expanded] = (
-            base_vals * (1.0 - alpha_vals) + overlay_vals * alpha_vals
-        )
+        alpha_vals = alpha[mix_mask][..., None]
+        base_vals = result[mix_mask]
+        overlay_vals = overlay[mix_mask]
+        result[mix_mask] = base_vals * (1.0 - alpha_vals) + overlay_vals * alpha_vals
     overlay_mask = modes >= 1.5
     if np.any(overlay_mask):
         result[overlay_mask] = overlay[overlay_mask]
@@ -2501,6 +2497,7 @@ class OpenGLTerrainApp:
         self._default_white_texture: Optional["moderngl.Texture"] = None
         self._default_normal_texture: Optional["moderngl.Texture"] = None
         self._mouse_captured = False
+        self._billboard_birth_offsets: Dict[Tuple[int, int], float] = {}
 
     def _init_programs(self) -> None:
         assert self.ctx is not None
@@ -3047,6 +3044,129 @@ class OpenGLTerrainApp:
         self._particle_vao = None
         self._particle_count = 0
         self._update_dynamic_particles(0.0)
+
+    def _hardpoint_world_matrix(self, instance: BMDInstance, hardpoint: BMDHardpoint) -> np.ndarray:
+        model_matrix = np.asarray(instance.model_matrix, dtype=np.float32)
+        bone_matrices = instance.global_matrices if instance.global_matrices else []
+        if 0 <= hardpoint.bone_index < len(bone_matrices):
+            bone_matrix = bone_matrices[hardpoint.bone_index].astype(np.float32, copy=False)
+        else:
+            bone_matrix = np.eye(4, dtype=np.float32)
+        local = _compose_transform_quaternion(hardpoint.offset, hardpoint.rotation_quat)
+        return model_matrix @ bone_matrix @ local
+
+    def _build_static_lights(self) -> None:
+        if self.focus_terrain_only:
+            self.static_point_lights = []
+            return
+        static_lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            attachments = getattr(instance, "attachments", None)
+            if not attachments:
+                continue
+            if instance.animation_player is not None:
+                continue
+            for hardpoint in attachments:
+                color = np.asarray(hardpoint.color, dtype=np.float32)
+                if color.size != 3 or np.linalg.norm(color) < 1e-3:
+                    continue
+                radius = float(max(hardpoint.radius, 0.0))
+                if radius <= 1e-3:
+                    continue
+                world = self._hardpoint_world_matrix(instance, hardpoint)
+                position = world[:3, 3].astype(np.float32, copy=False)
+                static_lights.append((position, np.clip(color, 0.0, 6.0), radius))
+        self.static_point_lights = static_lights
+
+    def _collect_dynamic_lights(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        if self.focus_terrain_only:
+            return []
+        lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            attachments = getattr(instance, "attachments", None)
+            if not attachments:
+                continue
+            if instance.animation_player is None:
+                continue
+            for hardpoint in attachments:
+                color = np.asarray(hardpoint.color, dtype=np.float32)
+                if color.size != 3 or np.linalg.norm(color) < 1e-3:
+                    continue
+                radius = float(max(hardpoint.radius, 0.0))
+                if radius <= 1e-3:
+                    continue
+                world = self._hardpoint_world_matrix(instance, hardpoint)
+                position = world[:3, 3].astype(np.float32, copy=False)
+                lights.append((position, np.clip(color, 0.0, 6.0), radius))
+        return lights
+
+    def _update_dynamic_particles(self, time_value: float) -> None:
+        if (
+            self.focus_terrain_only
+            or self.ctx is None
+            or self.particle_program is None
+        ):
+            self._particle_count = 0
+            return
+
+        particle_entries: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            billboards = getattr(instance, "billboards", None)
+            if not billboards:
+                continue
+            for billboard_index, billboard in enumerate(billboards):
+                world = self._hardpoint_world_matrix(instance, billboard)
+                position = world[:3, 3].astype(np.float32, copy=False)
+                rotation = world[:3, :3].astype(np.float32, copy=False)
+                local_velocity = np.asarray(billboard.velocity, dtype=np.float32)
+                velocity = rotation @ local_velocity
+                key = (id(instance), billboard_index)
+                birth_offset = self._billboard_birth_offsets.get(key)
+                if birth_offset is None:
+                    seed = hash((key[0], key[1])) & 0xFFFF
+                    birth_offset = float(seed) / float(0xFFFF) * 5.0
+                    self._billboard_birth_offsets[key] = birth_offset
+                birth_time = time_value - birth_offset
+                particle_entries.append((position, velocity, birth_time))
+
+        if not particle_entries:
+            self._particle_count = 0
+            return
+
+        dtype = np.dtype([
+            ("in_position", "f4", 3),
+            ("in_velocity", "f4", 3),
+            ("in_birth", "f4"),
+        ])
+        particle_data = np.zeros(len(particle_entries), dtype=dtype)
+        for idx, (position, velocity, birth_time) in enumerate(particle_entries):
+            particle_data["in_position"][idx] = position
+            particle_data["in_velocity"][idx] = velocity
+            particle_data["in_birth"][idx] = birth_time
+
+        raw = particle_data.tobytes()
+        if self._particle_vbo is None:
+            self._particle_vbo = self.ctx.buffer(raw)
+        else:
+            if self._particle_vbo.size != len(raw):
+                self._particle_vbo.orphan(len(raw))
+            self._particle_vbo.write(raw)
+
+        if self._particle_vao is None:
+            self._particle_vao = self.ctx.vertex_array(
+                self.particle_program,
+                [
+                    (
+                        self._particle_vbo,
+                        "3f 3f 1f",
+                        "in_position",
+                        "in_velocity",
+                        "in_birth",
+                    )
+                ],
+            )
+
+        self._particle_count = len(particle_entries)
 
     def _find_sky_image(self) -> Optional[np.ndarray]:
         search_roots = getattr(self.texture_library, "search_roots", [])
