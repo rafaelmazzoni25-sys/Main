@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -329,6 +330,12 @@ public sealed class MaterialStateLibrary
             };
             StoreEntry(name, payload);
         }
+    }
+
+    private void StoreEntry(string name, JsonObject payload)
+    {
+        var dict = payload.ToDictionary(static pair => pair.Key, static pair => (object?)pair.Value);
+        StoreEntry(name, dict);
     }
 
     private void StoreEntry(string name, IReadOnlyDictionary<string, object?> payload)
