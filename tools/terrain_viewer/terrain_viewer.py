@@ -60,6 +60,45 @@ except Exception:  # noqa: BLE001
     pyglet = None  # type: ignore[assignment]
     pyglet_key = None  # type: ignore[assignment]
 
+
+def _get_depth_mask(ctx: "moderngl.Context") -> Optional[bool]:
+    if moderngl is None:
+        return None
+    targets = [ctx, getattr(ctx, "screen", None)]
+    for target in targets:
+        if target is None:
+            continue
+        try:
+            mask = getattr(target, "depth_mask")
+        except AttributeError:
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(mask, bool):
+            return mask
+        if isinstance(mask, (int, np.integer)):
+            return bool(mask)
+    return None
+
+
+def _set_depth_mask(ctx: "moderngl.Context", value: bool) -> bool:
+    if moderngl is None:
+        return False
+    updated = False
+    targets = [ctx, getattr(ctx, "screen", None)]
+    for target in targets:
+        if target is None:
+            continue
+        try:
+            setattr(target, "depth_mask", bool(value))
+        except AttributeError:
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+        else:
+            updated = True
+    return updated
+
 TERRAIN_SIZE = 256
 TERRAIN_SCALE = 100.0
 BUX_CODE = (0xFC, 0xCF, 0xAB)
@@ -644,6 +683,7 @@ class TerrainLoadResult:
     objects_path: Path
     objects_version: int
     all_objects: List[TerrainObject]
+    warnings: List[str] = field(default_factory=list)
 
 
 def _bilinear_resize(matrix: np.ndarray, factor: int) -> np.ndarray:
@@ -2051,7 +2091,7 @@ class _BMDMeshRenderer:
             ctx.blend_func = (src, dst)
         else:
             ctx.disable(moderngl.BLEND)
-        ctx.depth_mask = state.depth_write
+        _set_depth_mask(ctx, state.depth_write)
         if state.depth_test:
             ctx.enable(moderngl.DEPTH_TEST)
         else:
@@ -2960,8 +3000,16 @@ class OpenGLTerrainApp:
             config=config,
             visible=False,
         )
+        try:
+            self.window.switch_to()
+        except Exception:  # noqa: BLE001
+            # Alguns drivers precisam que o contexto seja ativado explicitamente
+            # antes da criação via moderngl. Se falhar aqui, permitimos que a
+            # criação do contexto trate o erro normalmente.
+            pass
         self.ctx = moderngl.create_context()
-        self.ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.CULL_FACE)
         white_pixel = bytes([255, 255, 255, 255])
         self._default_white_texture = self.ctx.texture((1, 1), 4, white_pixel)
         self._default_white_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
@@ -3039,9 +3087,9 @@ class OpenGLTerrainApp:
     def _render_sky(self, time_value: float) -> None:
         assert self.ctx is not None
         self.ctx.disable(moderngl.DEPTH_TEST)
-        previous_depth_mask = self.ctx.depth_mask
-        if previous_depth_mask:
-            self.ctx.depth_mask = False
+        previous_depth_mask = _get_depth_mask(self.ctx)
+        if previous_depth_mask is not None:
+            _set_depth_mask(self.ctx, False)
         self.ctx.screen.use()
         if (
             self.sky_texture is not None
@@ -3060,8 +3108,8 @@ class OpenGLTerrainApp:
             self.sky_program["u_color_top"].value = tuple(np.clip(top, 0.0, 1.0).tolist())
             self.sky_program["u_color_bottom"].value = tuple(np.clip(bottom, 0.0, 1.0).tolist())
             self._sky_gradient_vao.render(mode=moderngl.TRIANGLES, vertices=3)
-        if previous_depth_mask:
-            self.ctx.depth_mask = True
+        if previous_depth_mask is not None:
+            _set_depth_mask(self.ctx, previous_depth_mask)
         self.ctx.enable(moderngl.DEPTH_TEST)
 
     def _render_particles(self, view: np.ndarray, projection: np.ndarray, time_value: float) -> None:
@@ -3201,7 +3249,7 @@ class OpenGLTerrainApp:
                 mesh.vao_diffuse.render()
         self.ctx.disable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-        self.ctx.depth_mask = True
+        _set_depth_mask(self.ctx, True)
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
 
@@ -3223,7 +3271,15 @@ class OpenGLTerrainApp:
         image.save(destination)
 
     def run(self, *, show: bool, output: Optional[Path]) -> None:
-        self._setup()
+        try:
+            self._setup()
+        except Exception:
+            if self.window is not None:
+                try:
+                    self.window.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
         assert self.window is not None
         if not show and output is not None:
             self.render_frame()
@@ -4470,6 +4526,18 @@ def run_viewer(
         truncated = True
 
     display_result = replace(result, objects=list(display_objects))
+    warnings: List[str] = []
+
+    requested_renderer = renderer
+    active_renderer = renderer
+    opengl_available = moderngl is not None and pyglet is not None
+    if render and renderer == "opengl" and not opengl_available:
+        warning = (
+            "Renderer OpenGL indisponível: instale 'moderngl' e 'pyglet' ou selecione o modo Matplotlib."
+        )
+        print("Aviso:", warning)
+        warnings.append(warning)
+        active_renderer = "matplotlib"
 
     if enable_object_edit and not show:
         raise ValueError(
@@ -4482,21 +4550,22 @@ def run_viewer(
     if render:
         texture_library: Optional[TextureLibrary] = None
         material_library: Optional[MaterialStateLibrary] = None
-        if renderer == "opengl":
+        if requested_renderer == "opengl":
             texture_library = TextureLibrary(
                 display_result.world_path,
                 detail_factor=max(1, texture_detail),
                 object_path=object_path,
                 map_id=display_result.map_id,
             )
-            material_roots: List[Path] = []
-            if object_path:
-                material_roots.append(object_path)
-            guessed = guess_object_folder(world_path)
-            if guessed:
-                material_roots.append(guessed)
-            material_library = MaterialStateLibrary(display_result.world_path, extra_roots=material_roots)
-        elif view_mode == "3d" and overlay == "textures":
+            if active_renderer == "opengl":
+                material_roots: List[Path] = []
+                if object_path:
+                    material_roots.append(object_path)
+                guessed = guess_object_folder(world_path)
+                if guessed:
+                    material_roots.append(guessed)
+                material_library = MaterialStateLibrary(display_result.world_path, extra_roots=material_roots)
+        if active_renderer != "opengl" and texture_library is None and view_mode == "3d" and overlay == "textures":
             texture_library = TextureLibrary(
                 display_result.world_path,
                 detail_factor=max(1, texture_detail),
@@ -4505,7 +4574,7 @@ def run_viewer(
             )
 
         bmd_library: Optional[BMDLibrary] = None
-        if renderer == "opengl":
+        if requested_renderer == "opengl" and active_renderer == "opengl":
             search_roots: List[Path] = []
             if object_path:
                 search_roots.append(object_path)
@@ -4517,36 +4586,79 @@ def run_viewer(
                 search_roots.append(parent)
             bmd_library = BMDLibrary(search_roots, material_library=material_library)
 
-        render_scene(
-            display_result.data,
-            display_result.objects,
-            output=output,
-            show=show,
-            title=f"{world_path.name} (mapa {display_result.map_id}) — {len(display_result.objects)} objetos",
-            enable_object_edit=enable_object_edit,
-            view_mode=view_mode,
-            overlay=overlay,
-            texture_library=texture_library,
-            material_library=material_library,
-            renderer=renderer,
-            bmd_library=bmd_library,
-            fog_density=fog_density,
-            fog_color=fog_color,
-        )
+        render_success = False
+        if active_renderer == "opengl":
+            try:
+                render_scene(
+                    display_result.data,
+                    display_result.objects,
+                    output=output,
+                    show=show,
+                    title=f"{world_path.name} (mapa {display_result.map_id}) — {len(display_result.objects)} objetos",
+                    enable_object_edit=enable_object_edit,
+                    view_mode=view_mode,
+                    overlay=overlay,
+                    texture_library=texture_library,
+                    material_library=material_library,
+                    renderer="opengl",
+                    bmd_library=bmd_library,
+                    fog_density=fog_density,
+                    fog_color=fog_color,
+                )
+                render_success = True
+            except Exception as exc:  # noqa: BLE001
+                warning = (
+                    "Falha ao inicializar o renderer OpenGL. Alternando para Matplotlib."
+                    f" Detalhes: {exc}"
+                )
+                print("Aviso:", warning)
+                warnings.append(warning)
+                active_renderer = "matplotlib"
+
+        if not render_success and active_renderer != "opengl":
+            if texture_library is None and view_mode == "3d" and overlay == "textures":
+                texture_library = TextureLibrary(
+                    display_result.world_path,
+                    detail_factor=max(1, texture_detail),
+                    object_path=object_path,
+                    map_id=display_result.map_id,
+                )
+            render_scene(
+                display_result.data,
+                display_result.objects,
+                output=output,
+                show=show,
+                title=f"{world_path.name} (mapa {display_result.map_id}) — {len(display_result.objects)} objetos",
+                enable_object_edit=enable_object_edit,
+                view_mode=view_mode,
+                overlay=overlay,
+                texture_library=texture_library,
+                material_library=None,
+                renderer="matplotlib",
+                bmd_library=None,
+                fog_density=fog_density,
+                fog_color=fog_color,
+            )
+            render_success = True
+
         if texture_library is not None and texture_library.missing_indices:
             preview = ", ".join(map(str, texture_library.missing_indices[:10]))
             if len(texture_library.missing_indices) > 10:
                 preview += ", ..."
-            print(
-                "Aviso: não foi possível localizar todas as texturas. Índices ausentes:",
-                preview,
+            message = (
+                "Não foi possível localizar todas as texturas. Índices ausentes: "
+                + preview
             )
+            print("Aviso:", message)
+            warnings.append(message)
 
     if truncated:
-        print(
-            "Aviso: limite de objetos aplicado. Apenas"
+        notice = (
+            "Limite de objetos aplicado. Apenas"
             f" {len(display_result.objects)} de {len(filtered_objects)} objetos foram renderizados."
         )
+        print("Aviso:", notice)
+        warnings.append(notice)
 
     if export_objects is not None:
         export_objects_csv(display_result, export_objects)
@@ -4559,6 +4671,9 @@ def run_viewer(
     if save_objects is not None:
         save_objects_file(result, save_objects)
         print(f"Arquivo EncTerrain salvo em {save_objects}")
+
+    if warnings:
+        display_result.warnings.extend(warnings)
 
     if log_summary:
         if detailed_summary:
@@ -5160,6 +5275,8 @@ class TerrainViewerGUI:
         self.status_var.set(format_summary_line(result))
         self.last_result = result
         self.last_params = params
+        if (show or output is not None) and result.warnings:
+            messagebox.showwarning("Avisos", "\n".join(result.warnings))
         return result
 
     @staticmethod
