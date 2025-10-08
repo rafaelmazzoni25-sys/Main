@@ -15,9 +15,15 @@ dados sem executar o cliente completo.
 Dentro da raiz do repositório execute:
 
 ```bash
+# Linux/macOS
 dotnet build tools/terreno_visualisado/TerrenoVisualisado.csproj -c Release
 # Interface gráfica WinForms (requer Windows)
 dotnet build tools/terreno_visualisado/TerrenoVisualisado.Gui/TerrenoVisualisado.Gui.csproj -c Release
+
+# Windows (PowerShell ou Prompt) — utilize barras invertidas para evitar que o MSBuild
+# interprete o caminho como uma opção:
+dotnet build tools\terreno_visualisado\TerrenoVisualisado.csproj -c Release
+dotnet build tools\terreno_visualisado\TerrenoVisualisado.Gui\TerrenoVisualisado.Gui.csproj -c Release
 ```
 
 ## Uso
@@ -25,8 +31,13 @@ dotnet build tools/terreno_visualisado/TerrenoVisualisado.Gui/TerrenoVisualisado
 ```bash
 # Exemplo mínimo apontando para a pasta Data/World1 do cliente
 
+# Linux/macOS
 dotnet run --project tools/terreno_visualisado/TerrenoVisualisado.csproj -- \
     --world /caminho/para/Data/World1
+
+# Windows
+dotnet run --project tools\terreno_visualisado\TerrenoVisualisado.csproj -- \
+    --world C:\\caminho\\para\\Data\\World1
 ```
 
 Opções principais:
