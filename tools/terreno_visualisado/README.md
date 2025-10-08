@@ -57,6 +57,35 @@ um `EnumModelType.eum` opcional e ajustar escala/ID do mapa. Após o carregament
 Além do preview 2D tradicional, a interface inclui uma aba **Visualização 3D**
 com um renderizador OpenGL. O heightmap é convertido para uma malha completa,
 as camadas de tiles são mescladas em um atlas idêntico ao cliente e o resultado
-é desenhado com iluminação difusa e câmera orbitando livremente (botão esquerdo
-para orbitar, direito para pan e roda para zoom), permitindo inspecionar o
-terreno de forma fiel.
+é desenhado com iluminação difusa e câmera orbitando livremente, permitindo
+inspecionar o terreno de forma fiel. A partir desta aba também é possível
+instanciar os
+modelos BMD (malhas e animações), desenhando cada objeto com seus materiais,
+animações e estados corretos para aproximar ainda mais o comportamento do
+cliente original.
+
+#### Controles da câmera 3D
+
+* **Orbit (padrão)**
+  * Botão esquerdo: orbitar o alvo.
+  * Botão direito: deslocar lateralmente/verticalmente.
+  * Roda do mouse: aproximação/afastamento.
+  * Teclas `W`/`S` ou setas ↑/↓: ajustam a inclinação.
+  * Teclas `A`/`D` ou setas ←/→: ajustam o azimute.
+  * Teclas `Q`/`E` ou Page Up/Page Down: variam a distância.
+* **Modo voo** (`F` para alternar)
+  * Botão esquerdo: controla o olhar (yaw/pitch).
+  * `W`/`S`: move para frente/trás.
+  * `A`/`D`: strafe esquerda/direita.
+  * `Q`/`E`: sobe/desce.
+  * `Shift`: acelera, `Ctrl`: desacelera.
+  * Roda do mouse: ajusta a velocidade base.
+* `R`: redefine a câmera para o enquadramento padrão do mapa atual.
+
+### Instanciação dos modelos BMD
+
+A Visualização 3D oferece um pipeline completo de instanciação dos modelos BMD,
+carregando meshes, animações e estados associados a cada objeto. Durante o
+desenho, cada instância reaplica seus materiais, reproduz as animações e
+respeita os estados definidos, garantindo uma representação fiel aos recursos
+vistos dentro do cliente original.
