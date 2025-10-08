@@ -407,7 +407,7 @@ public sealed class WorldLoader
             return new Dictionary<int, string>();
         }
 
-        var regex = new Regex(@"^(?<id>\d+)\s*,\s*\"(?<name>[^\"]+)\"", RegexOptions.Compiled);
+        var regex = new Regex(@"^(?<id>\d+)\s*,\s*""(?<name>[^""]+)""", RegexOptions.Compiled);
         var map = new Dictionary<int, string>();
         foreach (var line in File.ReadLines(path))
         {
