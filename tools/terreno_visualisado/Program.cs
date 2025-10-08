@@ -10,9 +10,16 @@ internal static class Program
         try
         {
             var options = CliOptions.Parse(args);
+            if (options.ShowHelp)
+            {
+                PrintUsage();
+                return 0;
+            }
             if (options.WorldDirectory is null)
             {
-                throw new ArgumentException("Informe o diretório --world contendo os arquivos EncTerrain.");
+                PrintUsage();
+                Console.Error.WriteLine("Erro: Informe o diretório --world contendo os arquivos EncTerrain.");
+                return 1;
             }
 
             var loader = new WorldLoader();
@@ -124,6 +131,27 @@ internal static class Program
         }
     }
 
+    private static void PrintUsage()
+    {
+        Console.WriteLine("TerrenoVisualisado - utilitário de linha de comando");
+        Console.WriteLine();
+        Console.WriteLine("Uso:");
+        Console.WriteLine("  TerrenoVisualisado --world <pasta> [opções]");
+        Console.WriteLine();
+        Console.WriteLine("Opções disponíveis:");
+        Console.WriteLine("  --world <pasta>         Diretório contendo os arquivos EncTerrain");
+        Console.WriteLine("  --objects <pasta>       Diretório ObjectX correspondente (opcional)");
+        Console.WriteLine("  --map <id>              Força o ID numérico do mapa");
+        Console.WriteLine("  --enum <arquivo>        Caminho para o arquivo _enum.h");
+        Console.WriteLine("  --height-scale <valor>  Fator aplicado ao TerrainHeight.OZB");
+        Console.WriteLine("  --extended-height       Usa TerrainHeightNew.OZB mesmo se o clássico existir");
+        Console.WriteLine("  --output <arquivo>      Nome do arquivo JSON de saída (padrão terrainsummary.json)");
+        Console.WriteLine("  --help                  Mostra este resumo e sai");
+        Console.WriteLine();
+        Console.WriteLine("Exemplo:");
+        Console.WriteLine("  TerrenoVisualisado --world C:/MuOnline/Data/World1 --objects C:/MuOnline/Data/Object1");
+    }
+
     private sealed record CliOptions
     {
         public string? WorldDirectory { get; set; }
@@ -133,15 +161,25 @@ internal static class Program
         public float? HeightScale { get; set; }
         public bool ForceExtendedHeight { get; set; }
         public string? OutputPath { get; set; }
+        public bool ShowHelp { get; set; }
 
         public static CliOptions Parse(string[] args)
         {
             var options = new CliOptions();
+            if (args.Length == 0)
+            {
+                options.ShowHelp = true;
+                return options;
+            }
             for (var i = 0; i < args.Length; i++)
             {
                 var arg = args[i];
                 switch (arg)
                 {
+                    case "--help":
+                    case "-h":
+                        options.ShowHelp = true;
+                        break;
                     case "--world":
                         options.WorldDirectory = RequireValue(args, ref i, arg);
                         break;
