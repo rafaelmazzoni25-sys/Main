@@ -92,6 +92,15 @@ internal static class Program
         }
 
         Console.WriteLine($"Modelos BMD carregados: {world.ModelLibrary.Models.Count} (falhas: {world.ModelLibrary.Failures.Count})");
+        if (world.ModelLibrary.Models.Count > 0)
+        {
+            var animatedModels = world.ModelLibrary.Models.Values.Count(model => model.Actions.Any(action => action.KeyframeCount > 0));
+            var totalBones = world.ModelLibrary.Models.Values.Sum(model => model.Bones.Count(bone => !bone.IsDummy));
+            var totalKeyframes = world.ModelLibrary.Models.Values
+                .SelectMany(model => model.Actions)
+                .Sum(action => action.KeyframeCount);
+            Console.WriteLine($"Modelos com animação: {animatedModels}, ossos ativos: {totalBones}, quadros: {totalKeyframes}");
+        }
 
         void Increment(byte tile)
         {

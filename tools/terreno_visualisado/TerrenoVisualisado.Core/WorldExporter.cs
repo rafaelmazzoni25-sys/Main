@@ -62,6 +62,27 @@ public static class WorldExporter
                     mesh.Normals,
                     mesh.TexCoords,
                     mesh.Indices,
+                    BoneIndices = mesh.BoneIndices.Select(b => (int)b),
+                }),
+                Actions = kv.Value.Actions.Select(action => new
+                {
+                    action.KeyframeCount,
+                    action.LockPositions,
+                    LockedPositions = action.LockPositions
+                        ? action.LockedPositions.Select(p => new[] { p.X, p.Y, p.Z })
+                        : Array.Empty<float[]>(),
+                }),
+                Bones = kv.Value.Bones.Select(bone => new
+                {
+                    bone.Name,
+                    bone.Parent,
+                    bone.IsDummy,
+                    Animations = bone.Animations.Select(animation => new
+                    {
+                        Positions = animation.Positions.Select(p => new[] { p.X, p.Y, p.Z }),
+                        Rotations = animation.Rotations.Select(r => new[] { r.X, r.Y, r.Z }),
+                        Quaternions = animation.Quaternions.Select(q => new[] { q.X, q.Y, q.Z, q.W }),
+                    }),
                 }),
             });
 
