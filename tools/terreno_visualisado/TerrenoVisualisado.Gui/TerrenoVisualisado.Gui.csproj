@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net6.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
@@ -11,7 +11,7 @@
     <ProjectReference Include="../TerrenoVisualisado.Core/TerrenoVisualisado.Core.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="OpenTK" Version="4.7.8" />
-    <PackageReference Include="OpenTK.WinForms" Version="4.7.8" />
+    <PackageReference Include="OpenTK" Version="4.8.2" />
+    <PackageReference Include="OpenTK.WinForms" Version="4.8.2" />
   </ItemGroup>
 </Project>
