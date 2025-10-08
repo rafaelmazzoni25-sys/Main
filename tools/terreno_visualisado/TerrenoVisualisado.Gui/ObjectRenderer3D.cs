@@ -367,7 +367,7 @@ internal sealed class ObjectRenderer3D : IDisposable
         }
 
         var action = model.Actions[actionIndex];
-        var keyframes = Math.Max(1, action.KeyframeCount);
+        var keyframes = Math.Max(1, (int)action.KeyframeCount);
         var frameTime = _animationTime * AnimationFps;
         var wrapped = frameTime % keyframes;
         var currentFrame = (int)MathF.Floor(wrapped);
