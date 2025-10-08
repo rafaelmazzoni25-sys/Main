@@ -1,0 +1,238 @@
+using System;
+using OpenTK.Graphics.OpenGL4;
+using OpenTK.Mathematics;
+using TerrenoVisualisado.Core;
+
+namespace TerrenoVisualisado.Gui;
+
+internal sealed class TerrainRenderer3D : IDisposable
+{
+    private TerrainMesh? _mesh;
+    private TextureImage? _texture;
+    private bool _dirty = true;
+
+    private int _vao;
+    private int _vbo;
+    private int _ebo;
+    private int _textureHandle;
+    private int _program;
+    private int _uniformModel;
+    private int _uniformView;
+    private int _uniformProjection;
+    private int _uniformLightDir;
+    private int _uniformTexture;
+    private int _indexCount;
+
+    public void UpdateData(TerrainMesh? mesh, TextureImage? texture)
+    {
+        _mesh = mesh;
+        _texture = texture;
+        _dirty = true;
+    }
+
+    public void EnsureResources()
+    {
+        if (_mesh is null)
+        {
+            ReleaseResources();
+            return;
+        }
+
+        if (!_dirty)
+        {
+            return;
+        }
+
+        ReleaseResources();
+
+        _program = ShaderFactory.CreateProgram(VertexShaderSource, FragmentShaderSource);
+        _uniformModel = GL.GetUniformLocation(_program, "uModel");
+        _uniformView = GL.GetUniformLocation(_program, "uView");
+        _uniformProjection = GL.GetUniformLocation(_program, "uProjection");
+        _uniformLightDir = GL.GetUniformLocation(_program, "uLightDirection");
+        _uniformTexture = GL.GetUniformLocation(_program, "uTexture");
+
+        _vao = GL.GenVertexArray();
+        _vbo = GL.GenBuffer();
+        _ebo = GL.GenBuffer();
+
+        GL.BindVertexArray(_vao);
+
+        GL.BindBuffer(BufferTarget.ArrayBuffer, _vbo);
+        GL.BufferData(BufferTarget.ArrayBuffer, _mesh.Vertices.Length * sizeof(float), _mesh.Vertices, BufferUsageHint.StaticDraw);
+
+        GL.BindBuffer(BufferTarget.ElementArrayBuffer, _ebo);
+        GL.BufferData(BufferTarget.ElementArrayBuffer, _mesh.Indices.Length * sizeof(uint), _mesh.Indices, BufferUsageHint.StaticDraw);
+
+        var stride = _mesh.VertexStride * sizeof(float);
+        GL.EnableVertexAttribArray(0);
+        GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, 0);
+        GL.EnableVertexAttribArray(1);
+        GL.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
+        GL.EnableVertexAttribArray(2);
+        GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 6 * sizeof(float));
+
+        var image = _texture ?? TextureImage.FromRgba(1, 1, new byte[] { 200, 200, 200, 255 });
+        _textureHandle = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
+        GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, image.Width, image.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, image.Pixels);
+        GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
+
+        _indexCount = _mesh.Indices.Length;
+        _dirty = false;
+    }
+
+    public void Render(Matrix4 view, Matrix4 projection)
+    {
+        if (_mesh is null || _dirty)
+        {
+            return;
+        }
+
+        GL.Enable(EnableCap.DepthTest);
+        GL.UseProgram(_program);
+
+        var model = Matrix4.Identity;
+        var viewMatrix = view;
+        var projectionMatrix = projection;
+        GL.UniformMatrix4(_uniformModel, false, ref model);
+        GL.UniformMatrix4(_uniformView, false, ref viewMatrix);
+        GL.UniformMatrix4(_uniformProjection, false, ref projectionMatrix);
+
+        var lightDir = new Vector3(-0.4f, -1.0f, -0.6f);
+        GL.Uniform3(_uniformLightDir, lightDir);
+
+        GL.ActiveTexture(TextureUnit.Texture0);
+        GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
+        GL.Uniform1(_uniformTexture, 0);
+
+        GL.BindVertexArray(_vao);
+        GL.DrawElements(PrimitiveType.Triangles, _indexCount, DrawElementsType.UnsignedInt, 0);
+    }
+
+    public void Dispose()
+    {
+        ReleaseResources();
+        GC.SuppressFinalize(this);
+    }
+
+    private void ReleaseResources()
+    {
+        if (_program != 0)
+        {
+            GL.DeleteProgram(_program);
+            _program = 0;
+        }
+        if (_vao != 0)
+        {
+            GL.DeleteVertexArray(_vao);
+            _vao = 0;
+        }
+        if (_vbo != 0)
+        {
+            GL.DeleteBuffer(_vbo);
+            _vbo = 0;
+        }
+        if (_ebo != 0)
+        {
+            GL.DeleteBuffer(_ebo);
+            _ebo = 0;
+        }
+        if (_textureHandle != 0)
+        {
+            GL.DeleteTexture(_textureHandle);
+            _textureHandle = 0;
+        }
+        _indexCount = 0;
+    }
+
+    private const string VertexShaderSource = @"#version 330 core
+layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+
+uniform mat4 uModel;
+uniform mat4 uView;
+uniform mat4 uProjection;
+
+out vec3 vNormal;
+out vec2 vTexCoord;
+
+void main()
+{
+    vec4 worldPosition = uModel * vec4(aPosition, 1.0);
+    vNormal = mat3(uModel) * aNormal;
+    vTexCoord = aTexCoord;
+    gl_Position = uProjection * uView * worldPosition;
+}";
+
+    private const string FragmentShaderSource = @"#version 330 core
+in vec3 vNormal;
+in vec2 vTexCoord;
+
+uniform sampler2D uTexture;
+uniform vec3 uLightDirection;
+
+out vec4 FragColor;
+
+void main()
+{
+    vec3 normal = normalize(vNormal);
+    vec3 lightDir = normalize(-uLightDirection);
+    float diffuse = max(dot(normal, lightDir), 0.0);
+    vec4 color = texture(uTexture, vTexCoord);
+    float ambient = 0.3;
+    FragColor = vec4(color.rgb * (ambient + diffuse * 0.7), color.a);
+}";
+}
+
+internal static class ShaderFactory
+{
+    public static int CreateProgram(string vertexSource, string fragmentSource)
+    {
+        var vertex = CompileShader(ShaderType.VertexShader, vertexSource);
+        var fragment = CompileShader(ShaderType.FragmentShader, fragmentSource);
+
+        var program = GL.CreateProgram();
+        GL.AttachShader(program, vertex);
+        GL.AttachShader(program, fragment);
+        GL.LinkProgram(program);
+
+        GL.GetProgram(program, GetProgramParameterName.LinkStatus, out var status);
+        if (status != (int)All.True)
+        {
+            var log = GL.GetProgramInfoLog(program);
+            GL.DeleteShader(vertex);
+            GL.DeleteShader(fragment);
+            GL.DeleteProgram(program);
+            throw new InvalidOperationException($"Falha ao linkar shader: {log}");
+        }
+
+        GL.DetachShader(program, vertex);
+        GL.DetachShader(program, fragment);
+        GL.DeleteShader(vertex);
+        GL.DeleteShader(fragment);
+
+        return program;
+    }
+
+    private static int CompileShader(ShaderType type, string source)
+    {
+        var shader = GL.CreateShader(type);
+        GL.ShaderSource(shader, source);
+        GL.CompileShader(shader);
+        GL.GetShader(shader, ShaderParameter.CompileStatus, out var status);
+        if (status != (int)All.True)
+        {
+            var log = GL.GetShaderInfoLog(shader);
+            GL.DeleteShader(shader);
+            throw new InvalidOperationException($"Falha ao compilar shader: {log}");
+        }
+        return shader;
+    }
+}

@@ -10,4 +10,8 @@
   <ItemGroup>
     <ProjectReference Include="../TerrenoVisualisado.Core/TerrenoVisualisado.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenTK" Version="4.7.8" />
+    <PackageReference Include="OpenTK.WinForms" Version="4.7.8" />
+  </ItemGroup>
 </Project>
