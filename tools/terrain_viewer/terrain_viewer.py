@@ -2961,6 +2961,13 @@ class OpenGLTerrainApp:
             config=config,
             visible=False,
         )
+        try:
+            self.window.switch_to()
+        except Exception:  # noqa: BLE001
+            # Alguns drivers precisam que o contexto seja ativado explicitamente
+            # antes da criação via moderngl. Se falhar aqui, permitimos que a
+            # criação do contexto trate o erro normalmente.
+            pass
         self.ctx = moderngl.create_context()
         self.ctx.enable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
         white_pixel = bytes([255, 255, 255, 255])
@@ -3224,7 +3231,15 @@ class OpenGLTerrainApp:
         image.save(destination)
 
     def run(self, *, show: bool, output: Optional[Path]) -> None:
-        self._setup()
+        try:
+            self._setup()
+        except Exception:
+            if self.window is not None:
+                try:
+                    self.window.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
         assert self.window is not None
         if not show and output is not None:
             self.render_frame()
