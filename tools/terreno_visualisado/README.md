@@ -12,6 +12,8 @@ dados sem executar o cliente completo.
 
 ## Compilação
 
+### Linha de comando (dotnet CLI)
+
 Dentro da raiz do repositório execute:
 
 ```bash
@@ -25,6 +27,25 @@ dotnet build tools/terreno_visualisado/TerrenoVisualisado.Gui/TerrenoVisualisado
 dotnet build tools\terreno_visualisado\TerrenoVisualisado.csproj -c Release
 dotnet build tools\terreno_visualisado\TerrenoVisualisado.Gui\TerrenoVisualisado.Gui.csproj -c Release
 ```
+
+Caso esteja abrindo o projeto a partir de um diretório com espaços no Windows,
+lembre-se de envolver o caminho entre aspas (`"..."`). Exemplo:
+
+```powershell
+dotnet build "C:\\Users\\Rafael Mazzoni\\Downloads\\Projeto Unreal Estudos\\Ferramentas GFX\\Main-master\\Main-master\\tools\\terreno_visualisado\\TerrenoVisualisado.csproj" -c Release
+```
+
+Antes de compilar pela primeira vez, execute um `dotnet restore` no mesmo
+diretório do comando de build para que as dependências do SDK sejam baixadas.
+
+### Visual Studio 2022+
+
+Foi adicionada a solução `TerrenoVisualisado.sln` dentro da pasta da
+ferramenta. Abra-a no Visual Studio 2022 (ou superior) e aceite o diálogo para
+restaurar os pacotes (`Build > Restore NuGet Packages`). Depois disso os três
+projetos (`TerrenoVisualisado`, `TerrenoVisualisado.Core` e
+`TerrenoVisualisado.Gui`) aparecerão carregados e prontos para compilar nas
+configurações Debug/Release.
 
 ## Uso
 
