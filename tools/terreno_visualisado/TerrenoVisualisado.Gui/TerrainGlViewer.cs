@@ -17,7 +17,7 @@ internal sealed class TerrainGlViewer : UserControl
     private readonly OrbitCamera _camera = new();
     private readonly TerrainRenderer3D _renderer = new();
     private readonly ObjectRenderer3D _objectRenderer = new();
-    private readonly Timer _inputTimer;
+    private readonly System.Windows.Forms.Timer _inputTimer;
     private readonly Stopwatch _deltaWatch = Stopwatch.StartNew();
     private readonly HashSet<Keys> _keys = new();
     private TerrainMesh? _mesh;
@@ -38,8 +38,9 @@ internal sealed class TerrainGlViewer : UserControl
 
         _glControl = new GLControl(new GLControlSettings
         {
-            MajorVersion = 4,
-            MinorVersion = 1,
+            API = ContextAPI.OpenGL,
+            APIVersion = new Version(4, 1),
+            Profile = ContextProfile.Core,
             Flags = ContextFlags.Default,
         })
         {
@@ -62,7 +63,7 @@ internal sealed class TerrainGlViewer : UserControl
         _glControl.LostFocus += HandleLostFocus;
         _glControl.PreviewKeyDown += HandlePreviewKeyDown;
 
-        _inputTimer = new Timer
+        _inputTimer = new System.Windows.Forms.Timer
         {
             Interval = 16,
         };
