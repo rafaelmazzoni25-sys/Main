@@ -37,40 +37,41 @@ public readonly struct MapContext
 
     public IEnumerable<string> EnumerateTerrainLightCandidates()
     {
+        return EnumerateTerrainLightCandidatesCore(this);
+    }
+
+    private static IEnumerable<string> EnumerateTerrainLightCandidatesCore(MapContext context)
+    {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        return Enumerate();
 
-        IEnumerable<string> Enumerate()
+        if (context.IsBattleCastle && seen.Add("TerrainLight2"))
         {
-            if (IsBattleCastle && seen.Add("TerrainLight2"))
-            {
-                yield return "TerrainLight2";
-            }
+            yield return "TerrainLight2";
+        }
 
-            if (seen.Add("TerrainLight"))
-            {
-                yield return "TerrainLight";
-            }
+        if (seen.Add("TerrainLight"))
+        {
+            yield return "TerrainLight";
+        }
 
-            if (IsCryWolf && seen.Add("TerrainLight1"))
-            {
-                yield return "TerrainLight1";
-            }
+        if (context.IsCryWolf && seen.Add("TerrainLight1"))
+        {
+            yield return "TerrainLight1";
+        }
 
-            if (IsCryWolf && seen.Add("TerrainLight2"))
-            {
-                yield return "TerrainLight2";
-            }
+        if (context.IsCryWolf && seen.Add("TerrainLight2"))
+        {
+            yield return "TerrainLight2";
+        }
 
-            if (seen.Add("TerrainLight1"))
-            {
-                yield return "TerrainLight1";
-            }
+        if (seen.Add("TerrainLight1"))
+        {
+            yield return "TerrainLight1";
+        }
 
-            if (seen.Add("TerrainLight2"))
-            {
-                yield return "TerrainLight2";
-            }
+        if (seen.Add("TerrainLight2"))
+        {
+            yield return "TerrainLight2";
         }
     }
 

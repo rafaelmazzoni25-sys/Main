@@ -254,7 +254,7 @@ internal static class BmdLoader
                 var polygon = (sbyte)data[ptr++];
                 ptr++; // alinhamento para short
 
-                Span<short> vertexIdx = stackalloc short[4];
+                var vertexIdx = new short[4];
                 for (var j = 0; j < 4; j++)
                 {
                     vertexIdx[j] = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(ptr));
@@ -263,7 +263,7 @@ internal static class BmdLoader
 
                 ptr += 8; // índices de normais não utilizados
 
-                Span<short> texIdx = stackalloc short[4];
+                var texIdx = new short[4];
                 for (var j = 0; j < 4; j++)
                 {
                     texIdx[j] = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(ptr));
