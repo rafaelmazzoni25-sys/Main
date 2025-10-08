@@ -10,6 +10,7 @@ import argparse
 import ast
 import csv
 import functools
+import hashlib
 import io
 import itertools
 import json
@@ -1008,31 +1009,51 @@ class TextureLibrary:
             return candidates[0]
         return None
 
-    def compose_texture_pixels(
+    def compose_texture_layers(
         self,
         layer1: np.ndarray,
         layer2: np.ndarray,
         alpha: np.ndarray,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         factor = self.detail_factor
         height, width = layer1.shape
-        pixels = np.zeros((height * factor, width * factor, 4), dtype=np.float32)
+        base = np.zeros((height * factor, width * factor, 4), dtype=np.float32)
+        overlay = np.zeros_like(base)
+        blend = np.zeros((height * factor, width * factor, 2), dtype=np.float32)
         for y in range(height):
             for x in range(width):
                 idx1 = int(layer1[y, x])
                 idx2 = int(layer2[y, x])
                 alpha_val = float(alpha[y, x])
                 base_patch = self._tile_patch(idx1, factor)
-                tile_patch = base_patch
+                overlay_patch = base_patch
+                mode = 0.0
                 if idx2 != 255 and alpha_val > 0.0:
                     overlay_patch = self._tile_patch(idx2, factor)
-                    tile_patch = (1.0 - alpha_val) * base_patch + alpha_val * overlay_patch
+                    if alpha_val >= 0.999:
+                        mode = 2.0
+                    else:
+                        mode = 1.0
+                else:
+                    alpha_val = 0.0
                 y0 = y * factor
                 y1 = y0 + factor
                 x0 = x * factor
                 x1 = x0 + factor
-                pixels[y0:y1, x0:x1, :] = tile_patch
-        return pixels
+                base[y0:y1, x0:x1, :] = base_patch
+                overlay[y0:y1, x0:x1, :] = overlay_patch
+                blend[y0:y1, x0:x1, 0] = alpha_val
+                blend[y0:y1, x0:x1, 1] = mode
+        return base, overlay, blend
+
+    def compose_texture_pixels(
+        self,
+        layer1: np.ndarray,
+        layer2: np.ndarray,
+        alpha: np.ndarray,
+    ) -> np.ndarray:
+        base, overlay, blend = self.compose_texture_layers(layer1, layer2, alpha)
+        return _merge_texture_layers(base, overlay, blend)
 
     def build_surface(self, data: TerrainData) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         factor = self.detail_factor
@@ -1063,6 +1084,32 @@ class TextureLibrary:
     @property
     def missing_indices(self) -> Sequence[int]:
         return sorted(self._missing)
+
+
+def _merge_texture_layers(
+    base: np.ndarray, overlay: np.ndarray, blend: np.ndarray
+) -> np.ndarray:
+    if base.size == 0:
+        return base
+    result = np.array(base, copy=True)
+    if overlay.shape != base.shape or blend.ndim != 3:
+        return np.clip(result, 0.0, 1.0)
+    alpha = np.clip(blend[..., 0], 0.0, 1.0)
+    modes = blend[..., 1]
+    mix_mask = (modes > 0.5) & (modes < 1.5)
+    if np.any(mix_mask):
+        mix_mask_expanded = mix_mask[..., None]
+        alpha_expanded = alpha[..., None]
+        base_vals = result[mix_mask_expanded]
+        overlay_vals = overlay[mix_mask_expanded]
+        alpha_vals = alpha_expanded[mix_mask_expanded]
+        result[mix_mask_expanded] = (
+            base_vals * (1.0 - alpha_vals) + overlay_vals * alpha_vals
+        )
+    overlay_mask = modes >= 1.5
+    if np.any(overlay_mask):
+        result[overlay_mask] = overlay[overlay_mask]
+    return np.clip(result, 0.0, 1.0)
 
 
 def compute_tile_material_flags(
@@ -1812,6 +1859,36 @@ def _compose_model_matrix(obj: TerrainObject) -> np.ndarray:
     return model
 
 
+@dataclass
+class _TerrainCacheEntry:
+    base_pixels: np.ndarray
+    overlay_pixels: np.ndarray
+    blend_pixels: np.ndarray
+    normal_map: np.ndarray
+    shadow_mask: np.ndarray
+
+
+_TERRAIN_BUFFER_CACHE: Dict[Tuple[str, int, str], _TerrainCacheEntry] = {}
+
+
+def _terrain_cache_key(
+    data: TerrainData,
+    detail: int,
+    overlay: str,
+    light_dir: np.ndarray,
+) -> Tuple[str, int, str]:
+    hasher = hashlib.sha1()
+    hasher.update(np.ascontiguousarray(data.height, dtype=np.float32).tobytes())
+    hasher.update(np.ascontiguousarray(data.mapping_layer1, dtype=np.uint8).tobytes())
+    hasher.update(np.ascontiguousarray(data.mapping_layer2, dtype=np.uint8).tobytes())
+    hasher.update(np.ascontiguousarray(data.mapping_alpha, dtype=np.float32).tobytes())
+    hasher.update(np.ascontiguousarray(data.attributes, dtype=np.uint8).tobytes())
+    hasher.update(np.ascontiguousarray(light_dir, dtype=np.float32).tobytes())
+    hasher.update(np.array([detail], dtype=np.int32).tobytes())
+    hasher.update(overlay.encode("utf-8"))
+    return overlay, detail, hasher.hexdigest()
+
+
 class _TerrainBuffers:
     def __init__(
         self,
@@ -1826,19 +1903,48 @@ class _TerrainBuffers:
         detail = texture_library.detail_factor
         heights = _upsample_height_map(data.height, detail)
         light_dir = texture_library.light_direction()
+        cache_key = _terrain_cache_key(data, detail, overlay, light_dir)
+        spacing = float(TERRAIN_SCALE) / max(1, detail)
+        cached = _TERRAIN_BUFFER_CACHE.get(cache_key)
+        if cached is None:
+            normal_map = _compute_normal_map(heights, spacing)
+            shadow_mask = _compute_shadow_mask(
+                heights,
+                light_dir,
+                spacing,
+            )
+            if overlay == "textures":
+                base_pixels, overlay_pixels, blend_pixels = texture_library.compose_texture_layers(
+                    data.mapping_layer1, data.mapping_layer2, data.mapping_alpha
+                )
+            else:
+                matrix, cmap_name = _overlay_matrix(data, overlay)
+                cmap = plt.get_cmap(cmap_name)
+                normalized = _normalize_for_colormap(matrix)
+                pixels = cmap(normalized)
+                base_pixels = pixels.astype(np.float32, copy=False)
+                overlay_pixels = base_pixels
+                blend_pixels = np.zeros((pixels.shape[0], pixels.shape[1], 2), dtype=np.float32)
+            cached = _TerrainCacheEntry(
+                base_pixels=base_pixels,
+                overlay_pixels=overlay_pixels,
+                blend_pixels=blend_pixels,
+                normal_map=normal_map,
+                shadow_mask=shadow_mask,
+            )
+            _TERRAIN_BUFFER_CACHE[cache_key] = cached
+        else:
+            normal_map = cached.normal_map
+            shadow_mask = cached.shadow_mask
+        base_pixels = cached.base_pixels
+        overlay_pixels = cached.overlay_pixels
+        blend_pixels = cached.blend_pixels
         tile_flags = compute_tile_material_flags(
             data.mapping_layer1,
             data.mapping_layer2,
             data.mapping_alpha,
             texture_library,
             material_library,
-        )
-        spacing = float(TERRAIN_SCALE) / max(1, detail)
-        normal_map = _compute_normal_map(heights, spacing)
-        shadow_mask = _compute_shadow_mask(
-            heights,
-            light_dir,
-            spacing,
         )
         if detail > 1:
             expanded_flags = np.repeat(np.repeat(tile_flags, detail, axis=0), detail, axis=1)
@@ -1912,23 +2018,27 @@ class _TerrainBuffers:
             else None
         )
 
-        if overlay == "textures":
-            pixels = texture_library.compose_texture_pixels(
-                data.mapping_layer1, data.mapping_layer2, data.mapping_alpha
-            )
-        else:
-            matrix, cmap_name = _overlay_matrix(data, overlay)
-            cmap = plt.get_cmap(cmap_name)
-            normalized = _normalize_for_colormap(matrix)
-            pixels = cmap(normalized)
-        pixels = np.clip(pixels, 0.0, 1.0)
-        height_px, width_px = pixels.shape[:2]
-        texture_bytes = (pixels * 255).astype(np.uint8).tobytes()
-        self.texture = ctx.texture((width_px, height_px), 4, texture_bytes)
-        self.texture.build_mipmaps()
-        self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
-        self.texture.repeat_x = True
-        self.texture.repeat_y = True
+        base_pixels = np.clip(base_pixels, 0.0, 1.0)
+        overlay_pixels = np.clip(overlay_pixels, 0.0, 1.0)
+        height_px, width_px = base_pixels.shape[:2]
+        base_bytes = (base_pixels * 255).astype(np.uint8).tobytes()
+        overlay_bytes = (overlay_pixels * 255).astype(np.uint8).tobytes()
+        blend_bytes = blend_pixels.astype(np.float32, copy=False).tobytes()
+        self.base_texture = ctx.texture((width_px, height_px), 4, base_bytes)
+        self.base_texture.build_mipmaps()
+        self.base_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self.base_texture.repeat_x = True
+        self.base_texture.repeat_y = True
+        self.overlay_texture = ctx.texture((width_px, height_px), 4, overlay_bytes)
+        self.overlay_texture.build_mipmaps()
+        self.overlay_texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self.overlay_texture.repeat_x = True
+        self.overlay_texture.repeat_y = True
+        self.blend_texture = ctx.texture((width_px, height_px), 2, blend_bytes, dtype="f4")
+        self.blend_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.blend_texture.repeat_x = True
+        self.blend_texture.repeat_y = True
+        self.texture = self.base_texture
         refined_heights = _bilinear_resize(data.height, detail)
         refined_normals = _compute_normal_map(refined_heights, float(TERRAIN_SCALE) / float(detail))
         if refined_normals.size == 0:
@@ -1978,6 +2088,10 @@ class _BMDMeshRenderer:
         self.base_positions = mesh.positions.astype(np.float32, copy=True)
         self.base_normals = mesh.normals.astype(np.float32, copy=True)
         self.base_texcoords = mesh.texcoords.astype(np.float32, copy=True)
+        if self.base_positions.size > 0:
+            self.bounding_center = np.mean(self.base_positions, axis=0).astype(np.float32)
+        else:
+            self.bounding_center = np.zeros(3, dtype=np.float32)
         self.vbo: Optional["moderngl.Buffer"]
         self.ibo: Optional["moderngl.Buffer"]
         self.vao_diffuse: Optional["moderngl.VertexArray"]
@@ -2422,7 +2536,9 @@ class OpenGLTerrainApp:
                 in vec3 v_normal;
                 in vec3 v_world_pos;
                 in vec2 v_uv;
-                uniform sampler2D u_texture;
+                uniform sampler2D u_base_texture;
+                uniform sampler2D u_overlay_texture;
+                uniform sampler2D u_blend_map;
                 uniform sampler2D u_normal_map;
                 uniform sampler2D u_shadow_map;
                 uniform sampler2D u_light_map;
@@ -2448,6 +2564,20 @@ class OpenGLTerrainApp:
                 const int FLAG_DOUBLE_SIDED = 64;
                 const int FLAG_NO_SHADOW = 128;
                 const int FLAG_NORMAL_MAP = 256;
+                vec4 sampleTerrainColor(vec2 uv) {
+                    vec4 base_tex = texture(u_base_texture, uv);
+                    vec4 overlay_tex = texture(u_overlay_texture, uv);
+                    vec2 blend = texture(u_blend_map, uv).rg;
+                    float mode = blend.y;
+                    float alpha = clamp(blend.x, 0.0, 1.0);
+                    if (mode < 0.5) {
+                        return base_tex;
+                    }
+                    if (mode < 1.5) {
+                        return mix(base_tex, overlay_tex, alpha);
+                    }
+                    return overlay_tex;
+                }
                 void main() {
                     vec2 uv = v_uv;
                     float wave = 0.0;
@@ -2461,7 +2591,7 @@ class OpenGLTerrainApp:
                         uv += vec2(0.0, lava);
                         wave += sin(u_time * 3.1 + v_world_pos.z * 0.004) * 0.12;
                     }
-                    vec4 tex = texture(u_texture, uv);
+                    vec4 tex = sampleTerrainColor(uv);
                     float alpha = tex.a;
                     if ((v_material & FLAG_ALPHA_TEST) != 0 && alpha < 0.35) {
                         discard;
@@ -2524,7 +2654,107 @@ class OpenGLTerrainApp:
             vertex_shader=terrain_vertex_shader,
             fragment_shader=terrain_fragment_shader,
         )
-        self.terrain_specular_program = None
+        terrain_specular_fragment_shader = textwrap.dedent(
+            """
+                #version 330
+                flat in int v_material;
+                in vec3 v_normal;
+                in vec3 v_world_pos;
+                in vec2 v_uv;
+                uniform sampler2D u_base_texture;
+                uniform sampler2D u_overlay_texture;
+                uniform sampler2D u_blend_map;
+                uniform sampler2D u_normal_map;
+                uniform sampler2D u_shadow_map;
+                uniform vec3 u_dir_light_dir;
+                uniform vec3 u_dir_light_color;
+                uniform int u_point_light_count;
+                uniform vec3 u_point_light_pos[__MAX_POINT_LIGHTS__];
+                uniform vec3 u_point_light_color[__MAX_POINT_LIGHTS__];
+                uniform float u_point_light_range[__MAX_POINT_LIGHTS__];
+                uniform vec3 u_camera_pos;
+                uniform float u_time;
+                uniform float u_fog_density;
+                uniform float u_shadow_strength;
+                out vec4 frag_color;
+                const int FLAG_WATER = 1;
+                const int FLAG_LAVA = 2;
+                const int FLAG_ALPHA_TEST = 32;
+                const int FLAG_NO_SHADOW = 128;
+                const int FLAG_NORMAL_MAP = 256;
+                vec4 sampleTerrainColor(vec2 uv) {
+                    vec4 base_tex = texture(u_base_texture, uv);
+                    vec4 overlay_tex = texture(u_overlay_texture, uv);
+                    vec2 blend = texture(u_blend_map, uv).rg;
+                    float mode = blend.y;
+                    float alpha = clamp(blend.x, 0.0, 1.0);
+                    if (mode < 0.5) {
+                        return base_tex;
+                    }
+                    if (mode < 1.5) {
+                        return mix(base_tex, overlay_tex, alpha);
+                    }
+                    return overlay_tex;
+                }
+                void main() {
+                    vec2 uv = v_uv;
+                    float wave = 0.0;
+                    if ((v_material & FLAG_WATER) != 0) {
+                        vec2 flow = vec2(sin(u_time * 0.35), cos(u_time * 0.4)) * 0.03;
+                        uv += flow;
+                        wave += sin(u_time * 1.6 + v_world_pos.x * 0.002 + v_world_pos.z * 0.002) * 0.08;
+                    }
+                    if ((v_material & FLAG_LAVA) != 0) {
+                        float lava = sin(u_time * 2.0 + v_world_pos.x * 0.003) * 0.07;
+                        uv += vec2(0.0, lava);
+                        wave += sin(u_time * 3.1 + v_world_pos.z * 0.004) * 0.12;
+                    }
+                    vec4 tex = sampleTerrainColor(uv);
+                    float alpha = tex.a;
+                    if ((v_material & FLAG_ALPHA_TEST) != 0 && alpha < 0.35) {
+                        discard;
+                    }
+                    vec3 normal = normalize(v_normal);
+                    vec3 map_normal = texture(u_normal_map, v_uv).xyz * 2.0 - 1.0;
+                    if (wave != 0.0) {
+                        normal = normalize(vec3(normal.x + wave, normal.y, normal.z + wave));
+                    }
+                    float normal_mix = ((v_material & FLAG_NORMAL_MAP) != 0) ? 0.7 : 0.45;
+                    normal = normalize(mix(normal, map_normal, normal_mix));
+                    vec3 base_color = tex.rgb;
+                    vec3 view_dir = normalize(u_camera_pos - v_world_pos);
+                    vec3 dir = normalize(-u_dir_light_dir);
+                    vec3 half_dir = normalize(dir + view_dir);
+                    float specular = pow(max(dot(normal, half_dir), 0.0), 30.0);
+                    float shadow = ((v_material & FLAG_NO_SHADOW) != 0) ? 1.0 : texture(u_shadow_map, v_uv).r;
+                    vec3 spec_color = base_color * specular * 0.18 * mix(1.0, shadow, u_shadow_strength) * u_dir_light_color;
+                    for (int i = 0; i < u_point_light_count; ++i) {
+                        vec3 to_light = u_point_light_pos[i] - v_world_pos;
+                        float dist = length(to_light);
+                        float range = max(u_point_light_range[i], 0.001);
+                        float attenuation = clamp(1.0 - dist / range, 0.0, 1.0);
+                        vec3 light_dir = normalize(to_light);
+                        vec3 half_vec = normalize(light_dir + view_dir);
+                        float spec = pow(max(dot(normal, half_vec), 0.0), 28.0);
+                        spec_color += u_point_light_color[i] * spec * 0.05 * attenuation * attenuation;
+                    }
+                    if ((v_material & FLAG_WATER) != 0) {
+                        spec_color *= vec3(0.9, 1.05, 1.1);
+                    }
+                    if ((v_material & FLAG_LAVA) != 0) {
+                        spec_color *= vec3(1.4, 0.6, 0.4);
+                    }
+                    float distance = length(v_world_pos - u_camera_pos);
+                    float fog = clamp(exp(-u_fog_density * distance), 0.0, 1.0);
+                    spec_color *= fog;
+                    frag_color = vec4(spec_color, 0.0);
+                }
+            """
+        ).replace("__MAX_POINT_LIGHTS__", str(MAX_POINT_LIGHTS))
+        self.terrain_specular_program = self.ctx.program(
+            vertex_shader=terrain_vertex_shader,
+            fragment_shader=terrain_specular_fragment_shader,
+        )
 
         object_vertex_shader = textwrap.dedent(
             """
@@ -3210,7 +3440,10 @@ class OpenGLTerrainApp:
 
         terrain = self.terrain
         assert terrain is not None
-        terrain.texture.use(location=0)
+        if getattr(terrain, "base_texture", None) is not None:
+            terrain.base_texture.use(location=0)
+        else:
+            terrain.texture.use(location=0)
         if terrain.normal_texture is not None:
             terrain.normal_texture.use(location=1)
         if terrain.shadow_texture is not None:
@@ -3219,13 +3452,21 @@ class OpenGLTerrainApp:
             terrain.light_texture.use(location=3)
         elif self._default_white_texture is not None:
             self._default_white_texture.use(location=3)
+        if getattr(terrain, "overlay_texture", None) is not None:
+            terrain.overlay_texture.use(location=4)
+        elif self._default_white_texture is not None:
+            self._default_white_texture.use(location=4)
+        if getattr(terrain, "blend_texture", None) is not None:
+            terrain.blend_texture.use(location=5)
         model_identity = np.eye(4, dtype=np.float32)
         self.ctx.disable(moderngl.BLEND)
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.terrain_program["u_model"].write(model_identity.tobytes())
         self.terrain_program["u_view"].write(view.astype("f4").tobytes())
         self.terrain_program["u_projection"].write(projection.astype("f4").tobytes())
-        self.terrain_program["u_texture"].value = 0
+        self.terrain_program["u_base_texture"].value = 0
+        self.terrain_program["u_overlay_texture"].value = 4
+        self.terrain_program["u_blend_map"].value = 5
         if terrain.normal_texture is not None:
             self.terrain_program["u_normal_map"].value = 1
         if terrain.shadow_texture is not None:
@@ -3245,6 +3486,35 @@ class OpenGLTerrainApp:
         self.terrain_program["u_emissive_override"].value = tuple(self.emissive_override.tolist())
         if terrain.vao_diffuse is not None:
             terrain.vao_diffuse.render()
+        if (
+            self.terrain_specular_program is not None
+            and terrain.vao_specular is not None
+        ):
+            spec_program = self.terrain_specular_program
+            spec_program["u_model"].write(model_identity.tobytes())
+            spec_program["u_view"].write(view.astype("f4").tobytes())
+            spec_program["u_projection"].write(projection.astype("f4").tobytes())
+            spec_program["u_base_texture"].value = 0
+            spec_program["u_overlay_texture"].value = 4
+            spec_program["u_blend_map"].value = 5
+            if terrain.normal_texture is not None:
+                spec_program["u_normal_map"].value = 1
+            if terrain.shadow_texture is not None:
+                spec_program["u_shadow_map"].value = 2
+            spec_program["u_dir_light_dir"].value = tuple(dir_light.tolist())
+            spec_program["u_dir_light_color"].value = tuple(self.directional_light_color.tolist())
+            spec_program["u_point_light_count"].value = point_count
+            spec_program["u_point_light_pos"].write(point_positions.astype("f4").tobytes())
+            spec_program["u_point_light_color"].write(point_colors.astype("f4").tobytes())
+            spec_program["u_point_light_range"].write(point_ranges.astype("f4").tobytes())
+            spec_program["u_camera_pos"].value = tuple(eye.tolist())
+            spec_program["u_time"].value = time_value
+            spec_program["u_fog_density"].value = self.fog_density
+            spec_program["u_shadow_strength"].value = self.shadow_strength
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func = moderngl.ONE, moderngl.ONE
+            terrain.vao_specular.render()
+            self.ctx.disable(moderngl.BLEND)
 
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
@@ -3262,28 +3532,47 @@ class OpenGLTerrainApp:
         self.object_program["u_camera_pos"].value = tuple(eye.tolist())
         self.object_program["u_texture"].value = 0
         self.object_program["u_normal_map"].value = 1
+        draw_commands: List[Tuple[bool, float, np.ndarray, _BMDMeshRenderer]] = []
+        eye_vec = eye.astype(np.float32, copy=False)
         for instance in self.object_instances:
-            self.object_program["u_model"].write(instance.model_matrix.astype(np.float32).tobytes())
+            model_matrix = np.asarray(instance.model_matrix, dtype=np.float32)
             for mesh in instance.mesh_renderers:
-                mesh.apply_state(self.ctx)
-                texture = mesh.texture or self._default_white_texture
-                normal_map = mesh.normal_texture or self._default_normal_texture
-                if texture is not None:
-                    texture.use(location=0)
-                if normal_map is not None:
-                    normal_map.use(location=1)
-                self.object_program["u_has_normal_map"].value = int(mesh.normal_texture is not None)
-                self.object_program["u_material_flags"].value = mesh.material_flags
-                emissive = np.clip(np.array(mesh.material_state.emissive, dtype=np.float32), 0.0, 4.0)
-                specular = np.array(mesh.material_state.specular, dtype=np.float32)
-                self.object_program["u_material_emissive"].value = tuple(emissive.tolist())
-                self.object_program["u_material_specular"].value = tuple(specular.tolist())
-                self.object_program["u_specular_power"].value = float(mesh.material_state.specular_power)
-                alpha_ref = float(mesh.material_state.alpha_ref if mesh.material_state.alpha_test else 0.0)
-                self.object_program["u_alpha_ref"].value = alpha_ref
                 if mesh.vao_diffuse is None:
                     continue
-                mesh.vao_diffuse.render()
+                center = getattr(mesh, "bounding_center", None)
+                if center is None or center.size != 3:
+                    world_center = model_matrix[:3, 3]
+                else:
+                    local_center = np.ones(4, dtype=np.float32)
+                    local_center[:3] = center.astype(np.float32, copy=False)
+                    world_center = (model_matrix @ local_center)[:3]
+                distance = float(np.linalg.norm(world_center - eye_vec))
+                draw_commands.append((bool(mesh.material_flags & MATERIAL_TRANSPARENT), distance, model_matrix, mesh))
+        opaque_draws = [cmd for cmd in draw_commands if not cmd[0]]
+        transparent_draws = sorted(
+            [cmd for cmd in draw_commands if cmd[0]],
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        for _, _, model_matrix, mesh in opaque_draws + transparent_draws:
+            self.object_program["u_model"].write(model_matrix.tobytes())
+            mesh.apply_state(self.ctx)
+            texture = mesh.texture or self._default_white_texture
+            normal_map = mesh.normal_texture or self._default_normal_texture
+            if texture is not None:
+                texture.use(location=0)
+            if normal_map is not None:
+                normal_map.use(location=1)
+            self.object_program["u_has_normal_map"].value = int(mesh.normal_texture is not None)
+            self.object_program["u_material_flags"].value = mesh.material_flags
+            emissive = np.clip(np.array(mesh.material_state.emissive, dtype=np.float32), 0.0, 4.0)
+            specular = np.array(mesh.material_state.specular, dtype=np.float32)
+            self.object_program["u_material_emissive"].value = tuple(emissive.tolist())
+            self.object_program["u_material_specular"].value = tuple(specular.tolist())
+            self.object_program["u_specular_power"].value = float(mesh.material_state.specular_power)
+            alpha_ref = float(mesh.material_state.alpha_ref if mesh.material_state.alpha_test else 0.0)
+            self.object_program["u_alpha_ref"].value = alpha_ref
+            mesh.vao_diffuse.render()
         self.ctx.disable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         _set_depth_mask(self.ctx, True)
