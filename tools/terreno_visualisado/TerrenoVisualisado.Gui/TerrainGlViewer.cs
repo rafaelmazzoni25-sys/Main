@@ -16,6 +16,7 @@ internal sealed class TerrainGlViewer : UserControl
     private readonly GLControl _glControl;
     private readonly OrbitCamera _camera = new();
     private readonly TerrainRenderer3D _renderer = new();
+    private readonly ObjectRenderer3D _objectRenderer = new();
     private readonly Timer _inputTimer;
     private readonly Stopwatch _deltaWatch = Stopwatch.StartNew();
     private readonly HashSet<Keys> _keys = new();
@@ -76,6 +77,7 @@ internal sealed class TerrainGlViewer : UserControl
             _inputTimer.Stop();
             _inputTimer.Dispose();
             _renderer.Dispose();
+            _objectRenderer.Dispose();
             _glControl.Dispose();
         }
         base.Dispose(disposing);
@@ -87,6 +89,7 @@ internal sealed class TerrainGlViewer : UserControl
         {
             _mesh = null;
             _renderer.UpdateData(null, null);
+            _objectRenderer.UpdateWorld(null);
             _flightMode = false;
             _rotating = false;
             _panning = false;
@@ -94,6 +97,7 @@ internal sealed class TerrainGlViewer : UserControl
             {
                 _glControl.MakeCurrent();
                 _renderer.EnsureResources();
+                _objectRenderer.EnsureResources();
                 _glControl.Invalidate();
             }
             return;
@@ -101,12 +105,14 @@ internal sealed class TerrainGlViewer : UserControl
 
         _mesh = TerrainMeshBuilder.Build(world.Terrain);
         _renderer.UpdateData(_mesh, world.Visual?.CompositeTexture);
+        _objectRenderer.UpdateWorld(world);
         ResetCamera();
 
         if (_contextReady)
         {
             _glControl.MakeCurrent();
             _renderer.EnsureResources();
+            _objectRenderer.EnsureResources();
             _glControl.Invalidate();
         }
     }
@@ -138,6 +144,7 @@ internal sealed class TerrainGlViewer : UserControl
         GL.ClearColor(0.1f, 0.14f, 0.2f, 1f);
         GL.Enable(EnableCap.DepthTest);
         _renderer.EnsureResources();
+        _objectRenderer.EnsureResources();
     }
 
     private void HandleResize(object? sender, EventArgs e)
@@ -176,6 +183,8 @@ internal sealed class TerrainGlViewer : UserControl
 
         _renderer.EnsureResources();
         _renderer.Render(view, projection);
+        _objectRenderer.EnsureResources();
+        _objectRenderer.Render(view, projection);
 
         _glControl.SwapBuffers();
     }
@@ -300,7 +309,8 @@ internal sealed class TerrainGlViewer : UserControl
         _deltaWatch.Restart();
 
         var updated = _flightMode ? UpdateFlight(deltaTime) : UpdateOrbit(deltaTime);
-        if (updated)
+        var animated = _objectRenderer.Update(deltaTime);
+        if (updated || animated)
         {
             _glControl.Invalidate();
         }
