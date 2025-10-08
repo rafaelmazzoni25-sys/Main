@@ -12,12 +12,6 @@ public sealed class WorldLoader
     private const float DefaultClassicHeightScale = 1.5f;
     private const float MinHeightBias = -500.0f;
 
-    private static readonly byte[] XorKey =
-    {
-        0xD1, 0x73, 0x52, 0xF6, 0xD2, 0x9A, 0xCB, 0x27,
-        0x3E, 0xAF, 0x59, 0x31, 0x37, 0xB3, 0xE7, 0xA2,
-    };
-
     private static readonly byte[] BuxCode = { 0xFC, 0xCF, 0xAB };
 
     public sealed class LoadOptions
@@ -50,6 +44,84 @@ public sealed class WorldLoader
         var resolvedMapId = options.MapId ?? (attributeMapId >= 0 ? attributeMapId : (mappingMapId >= 0 ? mappingMapId : objectMapId));
         AlignObjectsToTerrain(objects, terrain);
 
+        var materialLibrary = new MaterialStateLibrary(worldDirectory, new[] { objectsPath });
+        var textureLibrary = new TextureLibrary(worldDirectory, objectsPath, resolvedMapId);
+        var tileIndices = new HashSet<byte>();
+        foreach (var tile in terrain.Layer1)
+        {
+            tileIndices.Add(tile);
+        }
+        foreach (var tile in terrain.Layer2)
+        {
+            if (tile != 255)
+            {
+                tileIndices.Add(tile);
+            }
+        }
+
+        var compositeTexture = textureLibrary.ComposeLayeredTexture(terrain.Layer1, terrain.Layer2, terrain.Alpha);
+        var tileTextures = new Dictionary<byte, string?>(tileIndices.Count);
+        var tileMaterials = new Dictionary<byte, MaterialFlags>(tileIndices.Count);
+        foreach (var tile in tileIndices)
+        {
+            var resolvedTexture = textureLibrary.GetResolvedPath(tile) ?? textureLibrary.GetTileTextureName(tile);
+            tileTextures[tile] = resolvedTexture;
+            var materialState = materialLibrary.Lookup(resolvedTexture ?? string.Empty);
+            tileMaterials[tile] = materialState.ToFlags();
+        }
+        var materialFlagsPerTile = ComputeTileMaterialFlags(terrain.Layer1, terrain.Layer2, terrain.Alpha, tileMaterials);
+
+        var visual = new TerrainVisualData
+        {
+            CompositeTexture = compositeTexture,
+            TileTextures = tileTextures,
+            TileMaterialFlags = tileMaterials,
+            MaterialFlagsPerTile = materialFlagsPerTile,
+            MissingTileIndices = textureLibrary.MissingIndices.ToArray(),
+        };
+
+        var modelSearchRoots = new List<string>
+        {
+            objectsPath,
+            worldDirectory,
+        };
+        var parent = Directory.GetParent(worldDirectory);
+        if (parent != null)
+        {
+            modelSearchRoots.Add(parent.FullName);
+        }
+        var bmdLibrary = new BmdLibrary(modelSearchRoots, materialLibrary);
+        var models = new Dictionary<short, BmdModel>();
+        var modelFailures = new Dictionary<short, string>();
+        foreach (var obj in objects)
+        {
+            if (models.ContainsKey(obj.TypeId) || modelFailures.ContainsKey(obj.TypeId))
+            {
+                continue;
+            }
+            var path = bmdLibrary.Resolve(obj);
+            if (path is null)
+            {
+                modelFailures[obj.TypeId] = "Modelo não localizado";
+                continue;
+            }
+            var model = bmdLibrary.Load(obj);
+            if (model is not null)
+            {
+                models[obj.TypeId] = model;
+            }
+            else if (bmdLibrary.Failures.TryGetValue(path, out var failure))
+            {
+                modelFailures[obj.TypeId] = failure;
+            }
+        }
+
+        var modelLibrary = new ModelLibraryData
+        {
+            Models = new Dictionary<short, BmdModel>(models),
+            Failures = new Dictionary<short, string>(modelFailures),
+        };
+
         return new WorldData
         {
             WorldPath = Path.GetFullPath(worldDirectory),
@@ -58,7 +130,28 @@ public sealed class WorldLoader
             ObjectVersion = version,
             Terrain = terrain,
             Objects = objects,
+            Visual = visual,
+            ModelLibrary = modelLibrary,
         };
+    }
+
+    private static uint[] ComputeTileMaterialFlags(byte[] layer1, byte[] layer2, float[] alpha, IReadOnlyDictionary<byte, MaterialFlags> tileMaterials)
+    {
+        var result = new uint[layer1.Length];
+        for (var i = 0; i < layer1.Length; i++)
+        {
+            var baseTile = layer1[i];
+            var overlayTile = layer2[i];
+            var alphaValue = alpha[i];
+            var baseFlags = tileMaterials.TryGetValue(baseTile, out var flags) ? flags : MaterialFlags.None;
+            var overlayFlags = MaterialFlags.None;
+            if (overlayTile != 255 && alphaValue > 0.01f && tileMaterials.TryGetValue(overlayTile, out var overlay))
+            {
+                overlayFlags = overlay;
+            }
+            result[i] = (uint)(baseFlags | overlayFlags);
+        }
+        return result;
     }
 
     private static void AlignObjectsToTerrain(List<ObjectInstance> objects, TerrainData terrain)
@@ -108,7 +201,7 @@ public sealed class WorldLoader
     private static List<ObjectInstance> LoadObjects(string objectsPath, Dictionary<int, string> modelNames, out int version, out int mapId)
     {
         var raw = File.ReadAllBytes(objectsPath);
-        var decrypted = MapFileDecrypt(raw);
+        var decrypted = MapCrypto.Decrypt(raw);
         if (decrypted.Length < 4)
         {
             throw new InvalidDataException($"Arquivo EncTerrain.obj truncado: {objectsPath}");
@@ -173,7 +266,7 @@ public sealed class WorldLoader
         // atributos
         {
             var raw = File.ReadAllBytes(attributesPath);
-            var decrypted = MapFileDecrypt(raw);
+            var decrypted = MapCrypto.Decrypt(raw);
             BuxConvert(decrypted);
             if (decrypted.Length != 131076 && decrypted.Length != 65540)
             {
@@ -201,7 +294,7 @@ public sealed class WorldLoader
         // mapping
         {
             var raw = File.ReadAllBytes(mappingPath);
-            var decrypted = MapFileDecrypt(raw);
+            var decrypted = MapCrypto.Decrypt(raw);
             if (decrypted.Length < 2 + TerrainSize * TerrainSize * 3)
             {
                 throw new InvalidDataException($"Arquivo EncTerrain.map truncado: {mappingPath}");
@@ -408,20 +501,6 @@ public sealed class WorldLoader
         return int.Parse(digits, CultureInfo.InvariantCulture);
     }
 
-    private static byte[] MapFileDecrypt(byte[] input)
-    {
-        var output = new byte[input.Length];
-        byte wMapKey = 0x5E;
-        for (var i = 0; i < input.Length; i++)
-        {
-            var value = input[i];
-            var decrypted = (byte)(((value ^ XorKey[i % XorKey.Length]) - wMapKey) & 0xFF);
-            output[i] = decrypted;
-            wMapKey = (byte)((value + 0x3D) & 0xFF);
-        }
-        return output;
-    }
-
     private static void BuxConvert(Span<byte> data)
     {
         for (var i = 0; i < data.Length; i++)
@@ -467,4 +546,6 @@ public sealed class WorldData
     public int ObjectVersion { get; init; }
     public TerrainData Terrain { get; init; } = null!;
     public List<ObjectInstance> Objects { get; init; } = new();
+    public TerrainVisualData? Visual { get; init; }
+    public ModelLibraryData ModelLibrary { get; init; } = new();
 }

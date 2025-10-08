@@ -83,6 +83,16 @@ internal static class Program
             Console.WriteLine($"  {name}: {count}");
         }
 
+        if (world.Visual is { } visual)
+        {
+            Console.WriteLine($"Texturas distintas: {visual.TileTextures.Count} (faltando {visual.MissingTileIndices.Count})");
+            var waterTiles = visual.MaterialFlagsPerTile.Count(flag => (flag & (uint)MaterialFlags.Water) != 0);
+            var lavaTiles = visual.MaterialFlagsPerTile.Count(flag => (flag & (uint)MaterialFlags.Lava) != 0);
+            Console.WriteLine($"Tiles com água: {waterTiles}, lava: {lavaTiles}");
+        }
+
+        Console.WriteLine($"Modelos BMD carregados: {world.ModelLibrary.Models.Count} (falhas: {world.ModelLibrary.Failures.Count})");
+
         void Increment(byte tile)
         {
             tileCounts.TryGetValue(tile, out var count);

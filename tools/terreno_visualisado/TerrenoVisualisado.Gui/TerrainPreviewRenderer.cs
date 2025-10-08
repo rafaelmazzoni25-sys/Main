@@ -20,6 +20,15 @@ internal static class TerrainPreviewRenderer
     public static Bitmap Render(WorldData world, PreviewMode mode, bool overlayObjects)
     {
         var size = WorldLoader.TerrainSize;
+        if (mode == PreviewMode.Layer1 && world.Visual?.CompositeTexture is { } composite)
+        {
+            var bitmap = composite.ToBitmap();
+            if (overlayObjects)
+            {
+                OverlayObjects(world, bitmap);
+            }
+            return bitmap;
+        }
         var bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         var rect = new Rectangle(0, 0, size, size);
         var data = bitmap.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
@@ -55,20 +64,26 @@ internal static class TerrainPreviewRenderer
 
         if (overlayObjects)
         {
-            using var g = Graphics.FromImage(bitmap);
-            using var brush = new SolidBrush(Color.FromArgb(192, Color.Red));
-            foreach (var obj in world.Objects)
-            {
-                var px = obj.RawPosition.X / 100f;
-                var py = obj.RawPosition.Y / 100f;
-                var x = Math.Clamp((int)MathF.Round(px), 0, size - 1);
-                var y = Math.Clamp((int)MathF.Round(py), 0, size - 1);
-                var screenY = size - 1 - y;
-                g.FillEllipse(brush, x - 2, screenY - 2, 4, 4);
-            }
+            OverlayObjects(world, bitmap);
         }
 
         return bitmap;
+    }
+
+    private static void OverlayObjects(WorldData world, Bitmap bitmap)
+    {
+        var size = WorldLoader.TerrainSize;
+        using var g = Graphics.FromImage(bitmap);
+        using var brush = new SolidBrush(Color.FromArgb(192, Color.Red));
+        foreach (var obj in world.Objects)
+        {
+            var px = obj.RawPosition.X / 100f;
+            var py = obj.RawPosition.Y / 100f;
+            var x = Math.Clamp((int)MathF.Round(px), 0, size - 1);
+            var y = Math.Clamp((int)MathF.Round(py), 0, size - 1);
+            var screenY = size - 1 - y;
+            g.FillEllipse(brush, x - 2, screenY - 2, 4, 4);
+        }
     }
 
     private static void RenderHeight(float[] height, byte[] buffer, int stride, int size)
