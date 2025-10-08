@@ -16,6 +16,8 @@ Dentro da raiz do repositório execute:
 
 ```bash
 dotnet build tools/terreno_visualisado/TerrenoVisualisado.csproj -c Release
+# Interface gráfica WinForms (requer Windows)
+dotnet build tools/terreno_visualisado/TerrenoVisualisado.Gui/TerrenoVisualisado.Gui.csproj -c Release
 ```
 
 ## Uso
@@ -42,3 +44,12 @@ objetos estáticos mais comuns. O utilitário também gera um arquivo JSON
 `terrainsummary.json` no diretório atual contendo todas as amostras de altura,
 camadas e objetos já alinhados ao terreno, permitindo integrações com outras
 ferramentas.
+
+## Interface gráfica
+
+O projeto `TerrenoVisualisado.Gui` oferece uma interface WinForms para
+visualizar rapidamente as camadas carregadas, alternar entre altura, layers,
+atributos e alfa, além de sobrepor os objetos estáticos nas posições corretas.
+A tela principal permite selecionar as pastas do mundo e dos objetos, informar
+um `EnumModelType.eum` opcional e ajustar escala/ID do mapa. Após o carregamento
+é possível exportar o mesmo JSON gerado pelo utilitário de linha de comando.
