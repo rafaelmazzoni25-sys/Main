@@ -2450,6 +2450,7 @@ class OpenGLTerrainApp:
         fog_color: Tuple[float, float, float] = (0.25, 0.33, 0.45),
         fog_density: float = 0.00025,
         scene_focus: str = "terrain",
+        fog_density_locked: bool = False,
     ) -> None:
         if scene_focus not in {"terrain", "full"}:
             raise ValueError(f"Scene focus inválido: {scene_focus}")
@@ -2462,6 +2463,7 @@ class OpenGLTerrainApp:
         self.title = title
         self.fog_color = np.array(fog_color, dtype=np.float32)
         self.fog_density = fog_density
+        self._fog_density_locked = fog_density_locked
         self.scene_focus = scene_focus
         self.focus_terrain_only = scene_focus == "terrain"
         self.window_size = (1280, 720)
@@ -2498,6 +2500,19 @@ class OpenGLTerrainApp:
         self._default_normal_texture: Optional["moderngl.Texture"] = None
         self._mouse_captured = False
         self._billboard_birth_offsets: Dict[Tuple[int, int], float] = {}
+
+    def _maybe_adjust_fog_density(self, start: np.ndarray, target: np.ndarray) -> None:
+        if self._fog_density_locked:
+            return
+        distance = float(np.linalg.norm(start - target))
+        if not math.isfinite(distance) or distance <= 0.0:
+            return
+        target_visibility = 0.35
+        max_density = -math.log(max(target_visibility, 1e-3)) / distance
+        min_density = 2.5e-5
+        adjusted = max(min_density, min(self.fog_density, max_density))
+        if not math.isclose(self.fog_density, adjusted, rel_tol=1e-3, abs_tol=1e-6):
+            self.fog_density = adjusted
 
     def _init_programs(self) -> None:
         assert self.ctx is not None
@@ -3360,7 +3375,8 @@ class OpenGLTerrainApp:
             dtype=np.float32,
         )
         extent = (TERRAIN_SIZE - 1) * TERRAIN_SCALE
-        start = center + np.array([-0.25 * extent, 0.2 * extent, 0.28 * extent], dtype=np.float32)
+        start = center + np.array([-0.18 * extent, 0.12 * extent, 0.2 * extent], dtype=np.float32)
+        self._maybe_adjust_fog_density(start, center)
         self.camera = FreeCamera.from_look_at(start, center)
         self._start_time = time.perf_counter()
         self._last_frame_time = self._start_time
@@ -4219,6 +4235,7 @@ def render_scene(
             )
         if texture_library is None:
             raise ValueError("O renderer OpenGL requer um TextureLibrary inicializado.")
+        fog_density_value = fog_density if fog_density is not None else 0.00025
         app = OpenGLTerrainApp(
             data,
             objects,
@@ -4228,8 +4245,9 @@ def render_scene(
             overlay=overlay,
             title=title or "Visualização OpenGL",
             fog_color=fog_color or (0.25, 0.33, 0.45),
-            fog_density=fog_density or 0.00025,
+            fog_density=fog_density_value,
             scene_focus=scene_focus,
+            fog_density_locked=fog_density is not None,
         )
         app.run(show=show, output=output)
         return
