@@ -1,5 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////////
-// Terrain °ü·Ã ÇÔ¼ö
+#include <string>
+// Terrain Â°Ã¼Â·Ãƒ Ã‡Ã”Â¼Ã¶
 ///////////////////////////////////////////////////////////////////////////////
 
 #include "stdafx.h"
@@ -110,6 +111,74 @@ static void BuxConvert(BYTE* Buffer, int Size)
 	for (int i = 0; i < Size; i++)
 		Buffer[i] ^= bBuxCode[i % 3];
 }
+
+namespace
+{
+	constexpr long kClassicHeightMinSize = 4 + 1080 + static_cast<long>(TERRAIN_SIZE) * static_cast<long>(TERRAIN_SIZE);
+	constexpr long kExtendedHeightMinSize = 4 + 54 + static_cast<long>(TERRAIN_SIZE) * static_cast<long>(TERRAIN_SIZE) * 3;
+
+	std::string BuildHeightStem(const char* source)
+	{
+		if (source == nullptr)
+		{
+			return std::string();
+		}
+
+		std::string base(source);
+		const std::string::size_type dot = base.find_last_of('.');
+		if (dot != std::string::npos)
+		{
+			base.resize(dot);
+		}
+		return base;
+	}
+
+	std::string BuildClassicHeightPath(const char* source)
+	{
+		return "Data\\" + BuildHeightStem(source) + ".OZB";
+	}
+
+	std::string BuildExtendedHeightPath(const char* source)
+	{
+		return "Data\\" + BuildHeightStem(source) + "New.OZB";
+	}
+
+	long GetFileSize(const std::string& path)
+	{
+		FILE* fp = fopen(path.c_str(), "rb");
+		if (fp == nullptr)
+		{
+			return -1;
+		}
+		fseek(fp, 0, SEEK_END);
+		const long size = ftell(fp);
+		fclose(fp);
+		return size;
+	}
+
+	bool FileExistsWithMinSize(const std::string& path, long minSize)
+	{
+		const long size = GetFileSize(path);
+		return size >= minSize;
+	}
+
+	bool ShouldPreferExtendedHeight(const char* source)
+	{
+		const std::string classicPath = BuildClassicHeightPath(source);
+		const std::string extendedPath = BuildExtendedHeightPath(source);
+
+		const long classicSize = GetFileSize(classicPath);
+		if (classicSize < kClassicHeightMinSize)
+		{
+			if (FileExistsWithMinSize(extendedPath, kExtendedHeightMinSize))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+}
+
 
 int OpenTerrainAttribute(char* FileName)
 {
@@ -486,16 +555,44 @@ void CreateTerrain(char* FileName, bool bNew)
 {
 	ActiveTerrain = true;
 
-	if (bNew)
+	const std::string classicPath = BuildClassicHeightPath(FileName);
+	const std::string extendedPath = BuildExtendedHeightPath(FileName);
+	const long classicSize = GetFileSize(classicPath);
+	const bool hasExtended = FileExistsWithMinSize(extendedPath, kExtendedHeightMinSize);
+	bool preferExtended = bNew;
+
+	if (preferExtended == false && ShouldPreferExtendedHeight(FileName))
 	{
-		OpenTerrainHeightNew(FileName);
+		preferExtended = true;
+	}
+
+	if (preferExtended && hasExtended == false)
+	{
+		preferExtended = false;
+	}
+
+	bool loaded = false;
+	if (preferExtended)
+	{
+		loaded = OpenTerrainHeightNew(FileName);
+		if (loaded == false)
+		{
+			loaded = OpenTerrainHeight(FileName);
+		}
 	}
 	else
 	{
-		OpenTerrainHeight(FileName);
+		loaded = OpenTerrainHeight(FileName);
+		if (loaded == false && (hasExtended || classicSize < kClassicHeightMinSize))
+		{
+			loaded = OpenTerrainHeightNew(FileName);
+		}
 	}
 
-	CreateSun();
+	if (loaded)
+	{
+		CreateSun();
+	}
 }
 
 unsigned char BMPHeader[1080];
@@ -512,26 +609,12 @@ bool IsTerrainHeightExtMap(int iWorld)
 
 bool OpenTerrainHeight(char* filename)
 {
-	char FileName[256];
-
-	char NewFileName[256];
-
-	for (int i = 0; i < (int)strlen(filename); i++)
-	{
-		NewFileName[i] = filename[i];
-		NewFileName[i + 1] = NULL;
-		if (filename[i] == '.')
-			break;
-	}
-	strcpy(FileName, "Data\\");
-	strcat(FileName, NewFileName);
-	strcat(FileName, "OZB");
-
-	FILE* fp = fopen(FileName, "rb");
+	const std::string path = BuildClassicHeightPath(filename);
+	FILE* fp = fopen(path.c_str(), "rb");
 	if (fp == NULL)
 	{
 		char Text[256];
-		sprintf(Text, "%s file not found.", FileName);
+		sprintf(Text, "%s file not found.", path.c_str());
 		g_ErrorReport.Write(Text);
 		g_ErrorReport.Write("\r\n");
 		MessageBox(g_hWnd, Text, NULL, MB_OK);
@@ -539,23 +622,30 @@ bool OpenTerrainHeight(char* filename)
 		return false;
 	}
 	fseek(fp, 4, SEEK_SET);
-	int Index = 1080;
-	int Size = 256 * 256 + Index;
+	const int Index = 1080;
+	const int Size = TERRAIN_SIZE * TERRAIN_SIZE + Index;
 	unsigned char* Buffer = new unsigned char[Size];
-	fread(Buffer, 1, Size, fp);
+	const size_t read = fread(Buffer, 1, Size, fp);
 	fclose(fp);
+
+	if (read != static_cast<size_t>(Size))
+	{
+		SAFE_DELETE_ARRAY(Buffer);
+		return false;
+	}
+
 	memcpy(BMPHeader, Buffer, Index);
 
-	for (int i = 0; i < 256; i++)
+	for (int i = 0; i < TERRAIN_SIZE; i++)
 	{
-		unsigned char* src = &Buffer[Index + i * 256];
-		float* dst = &BackTerrainHeight[i * 256];
-		for (int j = 0; j < 256; j++)
+		unsigned char* src = &Buffer[Index + i * TERRAIN_SIZE];
+		float* dst = &BackTerrainHeight[i * TERRAIN_SIZE];
+		for (int j = 0; j < TERRAIN_SIZE; j++)
 		{
 			if (gMapManager.WorldActive == WD_55LOGINSCENE)
-				*dst = (float)(*src) * 3.0f;
+				*dst = static_cast<float>(*src) * 3.0f;
 			else
-				*dst = (float)(*src) * 1.5f;
+				*dst = static_cast<float>(*src) * 1.5f;
 			src++; dst++;
 		}
 	}
@@ -595,31 +685,47 @@ void SaveTerrainHeight(char* name)
 
 bool OpenTerrainHeightNew(const char* strFilename)
 {
-	char FileName[256];
-	char NewFileName[256];
-
-	for (int i = 0; i < (int)strlen(strFilename); i++)
+	const std::string extendedPath = BuildExtendedHeightPath(strFilename);
+	const std::string classicPath = BuildClassicHeightPath(strFilename);
+	std::string usedPath = extendedPath;
+	FILE* fp = fopen(usedPath.c_str(), "rb");
+	if (fp == nullptr)
 	{
-		NewFileName[i] = strFilename[i];
-		NewFileName[i + 1] = NULL;
-		if (strFilename[i] == '.') break;
+		usedPath = classicPath;
+		fp = fopen(usedPath.c_str(), "rb");
 	}
 
-	strcpy(FileName, "Data\\");
-	strcat(FileName, NewFileName);
-	strcat(FileName, "OZB");
+	if (fp == nullptr)
+	{
+		char Text[256];
+		sprintf(Text, "%s file not found.", extendedPath.c_str());
+		g_ErrorReport.Write(Text);
+		g_ErrorReport.Write("\r\n");
+		MessageBox(g_hWnd, Text, NULL, MB_OK);
+		SendMessage(g_hWnd, WM_DESTROY, 0, 0);
+		return false;
+	}
 
-	FILE* fp = fopen(FileName, "rb");
 	fseek(fp, 0, SEEK_END);
-	int iBytes = ftell(fp);
+	const long fileSize = ftell(fp);
 	fseek(fp, 0, SEEK_SET);
-	BYTE* pbyData = new BYTE[iBytes];
-	fread(pbyData, 1, iBytes, fp);
+	if (fileSize < kExtendedHeightMinSize)
+	{
+		fclose(fp);
+		return false;
+	}
+
+	BYTE* pbyData = new BYTE[fileSize];
+	const size_t read = fread(pbyData, 1, fileSize, fp);
 	fclose(fp);
+	if (read != static_cast<size_t>(fileSize))
+	{
+		delete[] pbyData;
+		return false;
+	}
 
 	DWORD dwCurPos = 0;
 	dwCurPos += 4;
-
 	BITMAPINFOHEADER bmiHeader;
 	BITMAPFILEHEADER header;
 	memcpy(&header, &pbyData[dwCurPos], sizeof(BITMAPFILEHEADER)); dwCurPos += sizeof(BITMAPFILEHEADER);
@@ -629,13 +735,13 @@ bool OpenTerrainHeightNew(const char* strFilename)
 	{
 		BYTE* pbysrc = &pbyData[dwCurPos + i * 3];
 		DWORD dwHeight = 0;
-		BYTE* pbyHeight = (BYTE*)&dwHeight;
+		BYTE* pbyHeight = reinterpret_cast<BYTE*>(&dwHeight);
 
 		pbyHeight[0] = pbysrc[2];
 		pbyHeight[1] = pbysrc[1];
 		pbyHeight[2] = pbysrc[0];
 
-		BackTerrainHeight[i] = (float)dwHeight;
+		BackTerrainHeight[i] = static_cast<float>(dwHeight);
 		BackTerrainHeight[i] += g_fMinHeight;
 	}
 
