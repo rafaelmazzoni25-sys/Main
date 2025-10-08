@@ -3681,11 +3681,12 @@ def render_scene(
         cmap = plt.get_cmap(cmap_name)
         normalized = _normalize_for_colormap(matrix)
         base_colors = cmap(normalized)
-        facecolors = base_colors[:-1, :-1, :]
-        shading = LightSource(azdeg=315, altdeg=55).shade(
-            render_heights, vert_exag=1.0, fraction=0.6
+        facecolors = base_colors[:-1, :-1, :].copy()
+        light_source = LightSource(azdeg=315, altdeg=55)
+        shaded_rgb = light_source.shade_rgb(
+            facecolors[..., :3], render_heights[:-1, :-1], fraction=0.6
         )
-        facecolors[..., :3] *= np.clip(shading[:-1, :-1, :], 0.0, 1.0)
+        facecolors[..., :3] = shaded_rgb
         facecolors = np.clip(facecolors, 0.0, 1.0)
 
     ax.plot_surface(
