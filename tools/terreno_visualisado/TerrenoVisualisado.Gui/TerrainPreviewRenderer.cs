@@ -29,9 +29,9 @@ internal static class TerrainPreviewRenderer
             }
             return bitmap;
         }
-        var bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+        var result = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         var rect = new Rectangle(0, 0, size, size);
-        var data = bitmap.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
+        var data = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
         try
         {
             var stride = data.Stride;
@@ -59,15 +59,15 @@ internal static class TerrainPreviewRenderer
         }
         finally
         {
-            bitmap.UnlockBits(data);
+            result.UnlockBits(data);
         }
 
         if (overlayObjects)
         {
-            OverlayObjects(world, bitmap);
+            OverlayObjects(world, result);
         }
 
-        return bitmap;
+        return result;
     }
 
     private static void OverlayObjects(WorldData world, Bitmap bitmap)
