@@ -1098,14 +1098,10 @@ def _merge_texture_layers(
     modes = blend[..., 1]
     mix_mask = (modes > 0.5) & (modes < 1.5)
     if np.any(mix_mask):
-        mix_mask_expanded = mix_mask[..., None]
-        alpha_expanded = alpha[..., None]
-        base_vals = result[mix_mask_expanded]
-        overlay_vals = overlay[mix_mask_expanded]
-        alpha_vals = alpha_expanded[mix_mask_expanded]
-        result[mix_mask_expanded] = (
-            base_vals * (1.0 - alpha_vals) + overlay_vals * alpha_vals
-        )
+        alpha_vals = alpha[mix_mask][..., None]
+        base_vals = result[mix_mask]
+        overlay_vals = overlay[mix_mask]
+        result[mix_mask] = base_vals * (1.0 - alpha_vals) + overlay_vals * alpha_vals
     overlay_mask = modes >= 1.5
     if np.any(overlay_mask):
         result[overlay_mask] = overlay[overlay_mask]
@@ -2454,6 +2450,7 @@ class OpenGLTerrainApp:
         fog_color: Tuple[float, float, float] = (0.25, 0.33, 0.45),
         fog_density: float = 0.00025,
         scene_focus: str = "terrain",
+        fog_density_locked: bool = False,
     ) -> None:
         if scene_focus not in {"terrain", "full"}:
             raise ValueError(f"Scene focus inválido: {scene_focus}")
@@ -2466,6 +2463,7 @@ class OpenGLTerrainApp:
         self.title = title
         self.fog_color = np.array(fog_color, dtype=np.float32)
         self.fog_density = fog_density
+        self._fog_density_locked = fog_density_locked
         self.scene_focus = scene_focus
         self.focus_terrain_only = scene_focus == "terrain"
         self.window_size = (1280, 720)
@@ -2501,6 +2499,20 @@ class OpenGLTerrainApp:
         self._default_white_texture: Optional["moderngl.Texture"] = None
         self._default_normal_texture: Optional["moderngl.Texture"] = None
         self._mouse_captured = False
+        self._billboard_birth_offsets: Dict[Tuple[int, int], float] = {}
+
+    def _maybe_adjust_fog_density(self, start: np.ndarray, target: np.ndarray) -> None:
+        if self._fog_density_locked:
+            return
+        distance = float(np.linalg.norm(start - target))
+        if not math.isfinite(distance) or distance <= 0.0:
+            return
+        target_visibility = 0.35
+        max_density = -math.log(max(target_visibility, 1e-3)) / distance
+        min_density = 2.5e-5
+        adjusted = max(min_density, min(self.fog_density, max_density))
+        if not math.isclose(self.fog_density, adjusted, rel_tol=1e-3, abs_tol=1e-6):
+            self.fog_density = adjusted
 
     def _init_programs(self) -> None:
         assert self.ctx is not None
@@ -3048,6 +3060,129 @@ class OpenGLTerrainApp:
         self._particle_count = 0
         self._update_dynamic_particles(0.0)
 
+    def _hardpoint_world_matrix(self, instance: BMDInstance, hardpoint: BMDHardpoint) -> np.ndarray:
+        model_matrix = np.asarray(instance.model_matrix, dtype=np.float32)
+        bone_matrices = instance.global_matrices if instance.global_matrices else []
+        if 0 <= hardpoint.bone_index < len(bone_matrices):
+            bone_matrix = bone_matrices[hardpoint.bone_index].astype(np.float32, copy=False)
+        else:
+            bone_matrix = np.eye(4, dtype=np.float32)
+        local = _compose_transform_quaternion(hardpoint.offset, hardpoint.rotation_quat)
+        return model_matrix @ bone_matrix @ local
+
+    def _build_static_lights(self) -> None:
+        if self.focus_terrain_only:
+            self.static_point_lights = []
+            return
+        static_lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            attachments = getattr(instance, "attachments", None)
+            if not attachments:
+                continue
+            if instance.animation_player is not None:
+                continue
+            for hardpoint in attachments:
+                color = np.asarray(hardpoint.color, dtype=np.float32)
+                if color.size != 3 or np.linalg.norm(color) < 1e-3:
+                    continue
+                radius = float(max(hardpoint.radius, 0.0))
+                if radius <= 1e-3:
+                    continue
+                world = self._hardpoint_world_matrix(instance, hardpoint)
+                position = world[:3, 3].astype(np.float32, copy=False)
+                static_lights.append((position, np.clip(color, 0.0, 6.0), radius))
+        self.static_point_lights = static_lights
+
+    def _collect_dynamic_lights(self) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        if self.focus_terrain_only:
+            return []
+        lights: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            attachments = getattr(instance, "attachments", None)
+            if not attachments:
+                continue
+            if instance.animation_player is None:
+                continue
+            for hardpoint in attachments:
+                color = np.asarray(hardpoint.color, dtype=np.float32)
+                if color.size != 3 or np.linalg.norm(color) < 1e-3:
+                    continue
+                radius = float(max(hardpoint.radius, 0.0))
+                if radius <= 1e-3:
+                    continue
+                world = self._hardpoint_world_matrix(instance, hardpoint)
+                position = world[:3, 3].astype(np.float32, copy=False)
+                lights.append((position, np.clip(color, 0.0, 6.0), radius))
+        return lights
+
+    def _update_dynamic_particles(self, time_value: float) -> None:
+        if (
+            self.focus_terrain_only
+            or self.ctx is None
+            or self.particle_program is None
+        ):
+            self._particle_count = 0
+            return
+
+        particle_entries: List[Tuple[np.ndarray, np.ndarray, float]] = []
+        for instance in self.object_instances:
+            billboards = getattr(instance, "billboards", None)
+            if not billboards:
+                continue
+            for billboard_index, billboard in enumerate(billboards):
+                world = self._hardpoint_world_matrix(instance, billboard)
+                position = world[:3, 3].astype(np.float32, copy=False)
+                rotation = world[:3, :3].astype(np.float32, copy=False)
+                local_velocity = np.asarray(billboard.velocity, dtype=np.float32)
+                velocity = rotation @ local_velocity
+                key = (id(instance), billboard_index)
+                birth_offset = self._billboard_birth_offsets.get(key)
+                if birth_offset is None:
+                    seed = hash((key[0], key[1])) & 0xFFFF
+                    birth_offset = float(seed) / float(0xFFFF) * 5.0
+                    self._billboard_birth_offsets[key] = birth_offset
+                birth_time = time_value - birth_offset
+                particle_entries.append((position, velocity, birth_time))
+
+        if not particle_entries:
+            self._particle_count = 0
+            return
+
+        dtype = np.dtype([
+            ("in_position", "f4", 3),
+            ("in_velocity", "f4", 3),
+            ("in_birth", "f4"),
+        ])
+        particle_data = np.zeros(len(particle_entries), dtype=dtype)
+        for idx, (position, velocity, birth_time) in enumerate(particle_entries):
+            particle_data["in_position"][idx] = position
+            particle_data["in_velocity"][idx] = velocity
+            particle_data["in_birth"][idx] = birth_time
+
+        raw = particle_data.tobytes()
+        if self._particle_vbo is None:
+            self._particle_vbo = self.ctx.buffer(raw)
+        else:
+            if self._particle_vbo.size != len(raw):
+                self._particle_vbo.orphan(len(raw))
+            self._particle_vbo.write(raw)
+
+        if self._particle_vao is None:
+            self._particle_vao = self.ctx.vertex_array(
+                self.particle_program,
+                [
+                    (
+                        self._particle_vbo,
+                        "3f 3f 1f",
+                        "in_position",
+                        "in_velocity",
+                        "in_birth",
+                    )
+                ],
+            )
+
+        self._particle_count = len(particle_entries)
+
     def _find_sky_image(self) -> Optional[np.ndarray]:
         search_roots = getattr(self.texture_library, "search_roots", [])
         candidates: List[Path] = []
@@ -3240,7 +3375,8 @@ class OpenGLTerrainApp:
             dtype=np.float32,
         )
         extent = (TERRAIN_SIZE - 1) * TERRAIN_SCALE
-        start = center + np.array([-0.25 * extent, 0.2 * extent, 0.28 * extent], dtype=np.float32)
+        start = center + np.array([-0.18 * extent, 0.12 * extent, 0.2 * extent], dtype=np.float32)
+        self._maybe_adjust_fog_density(start, center)
         self.camera = FreeCamera.from_look_at(start, center)
         self._start_time = time.perf_counter()
         self._last_frame_time = self._start_time
@@ -4099,6 +4235,7 @@ def render_scene(
             )
         if texture_library is None:
             raise ValueError("O renderer OpenGL requer um TextureLibrary inicializado.")
+        fog_density_value = fog_density if fog_density is not None else 0.00025
         app = OpenGLTerrainApp(
             data,
             objects,
@@ -4108,8 +4245,9 @@ def render_scene(
             overlay=overlay,
             title=title or "Visualização OpenGL",
             fog_color=fog_color or (0.25, 0.33, 0.45),
-            fog_density=fog_density or 0.00025,
+            fog_density=fog_density_value,
             scene_focus=scene_focus,
+            fog_density_locked=fog_density is not None,
         )
         app.run(show=show, output=output)
         return
