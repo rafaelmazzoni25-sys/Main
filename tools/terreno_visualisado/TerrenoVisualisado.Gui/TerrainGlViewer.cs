@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Text;
 using System.Windows.Forms;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Mathematics;
@@ -61,26 +62,14 @@ internal sealed class TerrainGlViewer : UserControl
         Dock = DockStyle.Fill;
         DoubleBuffered = true;
 
-        try
+        _glControl = TryCreateGlControl(out _renderingError);
+        if (_glControl is not null)
         {
-            _glControl = new GLControl(new GLControlSettings
-            {
-                API = ContextAPI.OpenGL,
-                APIVersion = new Version(3, 3),
-                Profile = ContextProfile.Core,
-                Flags = ContextFlags.Default,
-            })
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.Black,
-                TabStop = true,
-            };
             _renderSurface = _glControl;
         }
-        catch (Exception ex)
+        else
         {
             _renderingUnavailable = true;
-            _renderingError = $"Não foi possível inicializar a visualização 3D: {ex.Message}";
             _renderSurface = CreateFallbackSurface();
             ScheduleRenderingErrorMessage();
         }
@@ -238,6 +227,7 @@ internal sealed class TerrainGlViewer : UserControl
             catch
             {
             }
+
             _toolTip.Dispose();
             _glControl?.Dispose();
         }
@@ -1037,5 +1027,51 @@ internal sealed class TerrainGlViewer : UserControl
         };
         graphics.DrawString(_renderingError, Font ?? SystemFonts.DefaultFont, brush,
             new RectangleF(0, 0, Width, Height), format);
+    }
+
+    private GLControl? TryCreateGlControl(out string? error)
+    {
+        var attempts = new (Version Version, ContextProfile Profile, string Description)[]
+        {
+            (new Version(3, 3), ContextProfile.Core, "OpenGL 3.3 (core)"),
+            (new Version(3, 3), ContextProfile.Compatability, "OpenGL 3.3 (compatibility)"),
+            (new Version(3, 0), ContextProfile.Compatability, "OpenGL 3.0 (compatibility)"),
+            (new Version(2, 1), ContextProfile.Compatability, "OpenGL 2.1"),
+        };
+
+        var builder = new StringBuilder();
+        builder.AppendLine("Não foi possível inicializar a visualização 3D.");
+        builder.AppendLine("Tentativas executadas:");
+
+        foreach (var attempt in attempts)
+        {
+            try
+            {
+                var control = new GLControl(new GLControlSettings
+                {
+                    API = ContextAPI.OpenGL,
+                    APIVersion = attempt.Version,
+                    Profile = attempt.Profile,
+                    Flags = ContextFlags.Default,
+                })
+                {
+                    Dock = DockStyle.Fill,
+                    BackColor = Color.Black,
+                    TabStop = true,
+                };
+
+                error = null;
+                return control;
+            }
+            catch (Exception ex)
+            {
+                builder.AppendLine($"- {attempt.Description}: {ex.Message}");
+            }
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("Verifique os drivers da placa de vídeo e o suporte a OpenGL 3.0 ou superior.");
+        error = builder.ToString().Trim();
+        return null;
     }
 }
