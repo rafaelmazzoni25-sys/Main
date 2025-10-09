@@ -11,6 +11,7 @@ public sealed class WorldLoader
     public const float TerrainScale = 100.0f;
     private const float DefaultClassicHeightScale = 1.5f;
     private const float MinHeightBias = -500.0f;
+    private const int ObjectRecordSize = 2 + (3 * 4) + (3 * 4) + 4;
 
     private static readonly byte[] BuxCode = { 0xFC, 0xCF, 0xAB };
 
@@ -252,7 +253,8 @@ public sealed class WorldLoader
     {
         var raw = File.ReadAllBytes(objectsPath);
         var decrypted = MapCrypto.Decrypt(raw);
-        if (decrypted.Length < 4)
+        const int headerSize = 4;
+        if (decrypted.Length < headerSize)
         {
             throw new InvalidDataException($"Arquivo EncTerrain.obj truncado: {objectsPath}");
         }
@@ -268,10 +270,26 @@ public sealed class WorldLoader
             throw new InvalidDataException($"Contagem negativa de objetos em {objectsPath}");
         }
 
+        var payloadLength = span.Length - headerSize;
+        var expectedPayload = (long)count * ObjectRecordSize;
+        if (payloadLength < expectedPayload)
+        {
+            var expectedTotal = headerSize + expectedPayload;
+            var expectedText = expectedTotal.ToString(CultureInfo.InvariantCulture);
+            var actualText = span.Length.ToString(CultureInfo.InvariantCulture);
+            var mapSuffix = mapId >= 0 ? mapId.ToString("D2", CultureInfo.InvariantCulture) : string.Empty;
+            var objectLabel = string.IsNullOrEmpty(mapSuffix)
+                ? "EncTerrainObjectXX.obj"
+                : $"EncTerrainObject{mapSuffix}.obj";
+            throw new InvalidDataException(
+                $"Dados de objetos insuficientes: Esperado {expectedText} bytes no arquivo '{objectsPath}', mas havia {actualText}. " +
+                $"Selecione o arquivo '{objectLabel}' correspondente à pasta selecionada.");
+        }
+
         var objects = new List<ObjectInstance>(count);
         for (var i = 0; i < count; i++)
         {
-            if (index + 34 > span.Length)
+            if (index + ObjectRecordSize > span.Length)
             {
                 throw new InvalidDataException($"Dados de objeto insuficientes em {objectsPath}");
             }
