@@ -17,7 +17,8 @@ internal sealed class TerrainGlViewer : UserControl
     private static readonly Vector3 DefaultFogColor = new(0.23f, 0.28f, 0.34f);
     private static readonly Vector2 DefaultFogParams = new(0.00045f, 1.35f);
 
-    private readonly GLControl _glControl;
+    private readonly GLControl? _glControl;
+    private readonly Control _renderSurface;
     private readonly OrbitCamera _camera = new();
     private readonly TerrainRenderer3D _renderer = new();
     private readonly ObjectRenderer3D _objectRenderer = new();
@@ -60,18 +61,29 @@ internal sealed class TerrainGlViewer : UserControl
         Dock = DockStyle.Fill;
         DoubleBuffered = true;
 
-        _glControl = new GLControl(new GLControlSettings
+        try
         {
-            API = ContextAPI.OpenGL,
-            APIVersion = new Version(3, 3),
-            Profile = ContextProfile.Core,
-            Flags = ContextFlags.Default,
-        })
+            _glControl = new GLControl(new GLControlSettings
+            {
+                API = ContextAPI.OpenGL,
+                APIVersion = new Version(3, 3),
+                Profile = ContextProfile.Core,
+                Flags = ContextFlags.Default,
+            })
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black,
+                TabStop = true,
+            };
+            _renderSurface = _glControl;
+        }
+        catch (Exception ex)
         {
-            Dock = DockStyle.Fill,
-            BackColor = Color.Black,
-            TabStop = true,
-        };
+            _renderingUnavailable = true;
+            _renderingError = $"Não foi possível inicializar a visualização 3D: {ex.Message}";
+            _renderSurface = CreateFallbackSurface();
+            ScheduleRenderingErrorMessage();
+        }
 
         var layout = new TableLayoutPanel
         {
@@ -96,12 +108,12 @@ internal sealed class TerrainGlViewer : UserControl
         _terrainToggle = CreateToggle("Terreno", (_, _) =>
         {
             _showTerrain = _terrainToggle.Checked;
-            _glControl.Invalidate();
+            _glControl?.Invalidate();
         }, true);
         _objectToggle = CreateToggle("Objetos", (_, _) =>
         {
             _showObjects = _objectToggle.Checked;
-            _glControl.Invalidate();
+            _glControl?.Invalidate();
         }, true);
         _fogToggle = CreateToggle("Névoa", (_, _) =>
         {
@@ -111,7 +123,7 @@ internal sealed class TerrainGlViewer : UserControl
         _skyToggle = CreateToggle("Céu", (_, _) =>
         {
             _skyEnabled = _skyToggle.Checked;
-            _glControl.Invalidate();
+            _glControl?.Invalidate();
         }, true);
         _lightingToggle = CreateToggle("Iluminação", (_, _) =>
         {
@@ -137,8 +149,8 @@ internal sealed class TerrainGlViewer : UserControl
         });
 
         layout.Controls.Add(optionsPanel, 0, 0);
-        _glControl.Margin = new Padding(0);
-        layout.Controls.Add(_glControl, 0, 1);
+        _renderSurface.Margin = new Padding(0);
+        layout.Controls.Add(_renderSurface, 0, 1);
 
         _toolTip.SetToolTip(_terrainToggle, "Exibe ou oculta a malha do terreno.");
         _toolTip.SetToolTip(_objectToggle, "Instancia os modelos BMD carregados.");
@@ -147,24 +159,32 @@ internal sealed class TerrainGlViewer : UserControl
         _toolTip.SetToolTip(_lightingToggle, "Aplica iluminação difusa e especular.");
         _toolTip.SetToolTip(_animationToggle, "Reproduz animações dos objetos.");
         _toolTip.SetToolTip(_gameModeToggle, "Ativa o modo de navegação livre com câmera em primeira pessoa.");
-        _toolTip.SetToolTip(_glControl,
-            "Modo órbita: botão esquerdo para orbitar, direito para pan, roda para zoom.\n" +
-            "Modo jogo: marque a caixa ou pressione F. Use WASD para mover, E/Espaço para subir, Q para descer, " +
-            "Shift acelera e Ctrl desacelera.");
 
-        _skyRenderer.Configure(DefaultFogColor, _lightingProfile);
+        if (_glControl is not null)
+        {
+            _toolTip.SetToolTip(_glControl,
+                "Modo órbita: botão esquerdo para orbitar, direito para pan, roda para zoom.\n" +
+                "Modo jogo: marque a caixa ou pressione F. Use WASD para mover, E/Espaço para subir, Q para descer, " +
+                "Shift acelera e Ctrl desacelera.");
 
-        _glControl.Load += HandleLoad;
-        _glControl.Resize += HandleResize;
-        _glControl.Paint += HandlePaint;
-        _glControl.MouseDown += HandleMouseDown;
-        _glControl.MouseUp += HandleMouseUp;
-        _glControl.MouseMove += HandleMouseMove;
-        _glControl.MouseWheel += HandleMouseWheel;
-        _glControl.KeyDown += HandleKeyDown;
-        _glControl.KeyUp += HandleKeyUp;
-        _glControl.LostFocus += HandleLostFocus;
-        _glControl.PreviewKeyDown += HandlePreviewKeyDown;
+            _skyRenderer.Configure(DefaultFogColor, _lightingProfile);
+
+            _glControl.Load += HandleLoad;
+            _glControl.Resize += HandleResize;
+            _glControl.Paint += HandlePaint;
+            _glControl.MouseDown += HandleMouseDown;
+            _glControl.MouseUp += HandleMouseUp;
+            _glControl.MouseMove += HandleMouseMove;
+            _glControl.MouseWheel += HandleMouseWheel;
+            _glControl.KeyDown += HandleKeyDown;
+            _glControl.KeyUp += HandleKeyUp;
+            _glControl.LostFocus += HandleLostFocus;
+            _glControl.PreviewKeyDown += HandlePreviewKeyDown;
+        }
+        else
+        {
+            optionsPanel.Enabled = false;
+        }
 
         _inputTimer = new System.Windows.Forms.Timer
         {
@@ -180,16 +200,19 @@ internal sealed class TerrainGlViewer : UserControl
         {
             _inputTimer.Stop();
             _inputTimer.Dispose();
-            try
+            if (_glControl is not null)
             {
-                if (_contextReady && !_renderingUnavailable)
+                try
                 {
-                    _glControl.MakeCurrent();
+                    if (_contextReady && !_renderingUnavailable)
+                    {
+                        _glControl.MakeCurrent();
+                    }
                 }
-            }
-            catch
-            {
-                // Ignore errors when restoring the OpenGL context during disposal.
+                catch
+                {
+                    // Ignore errors when restoring the OpenGL context during disposal.
+                }
             }
 
             try
@@ -216,7 +239,7 @@ internal sealed class TerrainGlViewer : UserControl
             {
             }
             _toolTip.Dispose();
-            _glControl.Dispose();
+            _glControl?.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -927,6 +950,60 @@ internal sealed class TerrainGlViewer : UserControl
             MathHelper.Clamp(color.Z, min, max));
     }
 
+    private Control CreateFallbackSurface()
+    {
+        var panel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.Black,
+        };
+        panel.Paint += (_, e) => DrawFallbackMessage(e.Graphics);
+        return panel;
+    }
+
+    private void ScheduleRenderingErrorMessage()
+    {
+        if (string.IsNullOrWhiteSpace(_renderingError) || _renderingErrorShown)
+        {
+            return;
+        }
+
+        void ShowMessage()
+        {
+            if (_renderingErrorShown)
+            {
+                return;
+            }
+
+            _renderingErrorShown = true;
+            var owner = FindForm();
+            var message = _renderingError + Environment.NewLine + Environment.NewLine +
+                          "A visualização 3D foi desativada para evitar o fechamento do programa.";
+            MessageBox.Show(owner, message, "Visualização 3D indisponível", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        if (!IsHandleCreated)
+        {
+            void Handler(object? sender, EventArgs args)
+            {
+                HandleCreated -= Handler;
+                ShowMessage();
+            }
+
+            HandleCreated += Handler;
+            return;
+        }
+
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action(ShowMessage));
+        }
+        else
+        {
+            ShowMessage();
+        }
+    }
+
     private void HandleRenderingFailure(string stage, Exception ex)
     {
         if (_renderingUnavailable)
@@ -939,16 +1016,9 @@ internal sealed class TerrainGlViewer : UserControl
         _renderingError = $"Não foi possível {stage}: {ex.Message}";
         _inputTimer.Stop();
 
-        if (!_renderingErrorShown)
-        {
-            _renderingErrorShown = true;
-            var owner = FindForm();
-            var message = _renderingError + Environment.NewLine + Environment.NewLine +
-                          "A visualização 3D foi desativada para evitar o fechamento do programa.";
-            MessageBox.Show(owner, message, "Visualização 3D indisponível", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
+        ScheduleRenderingErrorMessage();
 
-        _glControl.Invalidate();
+        _glControl?.Invalidate();
     }
 
     private void DrawFallbackMessage(Graphics graphics)
