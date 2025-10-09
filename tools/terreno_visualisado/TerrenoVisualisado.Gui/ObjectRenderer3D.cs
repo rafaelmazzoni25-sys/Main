@@ -25,6 +25,9 @@ internal sealed class ObjectRenderer3D : IDisposable
     private Vector3 _lightDirection = new(-0.4f, -1.0f, -0.6f);
     private Vector3 _fogColor = new(0.23f, 0.28f, 0.34f);
     private Vector2 _fogParams = new(0.00045f, 1.35f);
+    private bool _fogEnabled = true;
+    private bool _lightingEnabled = true;
+    private bool _animationsEnabled = true;
 
     private int _program;
     private int _uniformModel;
@@ -39,6 +42,8 @@ internal sealed class ObjectRenderer3D : IDisposable
     private int _uniformFogColor;
     private int _uniformFogParams;
     private int _uniformTime;
+    private int _uniformFogEnabled;
+    private int _uniformLightingEnabled;
 
     public void UpdateWorld(WorldData? world)
     {
@@ -46,11 +51,13 @@ internal sealed class ObjectRenderer3D : IDisposable
         _dirty = true;
     }
 
-    public void ConfigureEnvironment(Vector3 lightDirection, Vector3 fogColor, Vector2 fogParams)
+    public void ConfigureEnvironment(Vector3 lightDirection, Vector3 fogColor, Vector2 fogParams, bool fogEnabled, bool lightingEnabled)
     {
         _lightDirection = lightDirection;
         _fogColor = fogColor;
         _fogParams = fogParams;
+        _fogEnabled = fogEnabled;
+        _lightingEnabled = lightingEnabled;
     }
 
     public bool Update(float deltaTime)
@@ -60,16 +67,33 @@ internal sealed class ObjectRenderer3D : IDisposable
             return false;
         }
 
-        if (deltaTime > 0f)
+        if (!_animationsEnabled || deltaTime <= 0f)
         {
-            _animationTime += deltaTime;
-            if (_animationTime > 3600f)
-            {
-                _animationTime -= 3600f;
-            }
+            return false;
         }
 
-        return _hasAnimatedModels && deltaTime > 0f;
+        _animationTime += deltaTime;
+        if (_animationTime > 3600f)
+        {
+            _animationTime -= 3600f;
+        }
+
+        return _hasAnimatedModels;
+    }
+
+    public void SetFogEnabled(bool enabled)
+    {
+        _fogEnabled = enabled;
+    }
+
+    public void SetLightingEnabled(bool enabled)
+    {
+        _lightingEnabled = enabled;
+    }
+
+    public void SetAnimationsEnabled(bool enabled)
+    {
+        _animationsEnabled = enabled;
     }
 
     public void EnsureResources()
@@ -95,6 +119,14 @@ internal sealed class ObjectRenderer3D : IDisposable
         GL.Uniform3(_uniformFogColor, _fogColor);
         GL.Uniform2(_uniformFogParams, _fogParams);
         GL.Uniform1(_uniformTime, _animationTime);
+        if (_uniformFogEnabled >= 0)
+        {
+            GL.Uniform1(_uniformFogEnabled, _fogEnabled ? 1 : 0);
+        }
+        if (_uniformLightingEnabled >= 0)
+        {
+            GL.Uniform1(_uniformLightingEnabled, _lightingEnabled ? 1 : 0);
+        }
 
         foreach (var instance in _world.Objects)
         {
@@ -197,6 +229,8 @@ internal sealed class ObjectRenderer3D : IDisposable
         _uniformFogColor = GL.GetUniformLocation(_program, "uFogColor");
         _uniformFogParams = GL.GetUniformLocation(_program, "uFogParams");
         _uniformTime = GL.GetUniformLocation(_program, "uTime");
+        _uniformFogEnabled = GL.GetUniformLocation(_program, "uFogEnabled");
+        _uniformLightingEnabled = GL.GetUniformLocation(_program, "uLightingEnabled");
     }
 
     private void ReleaseResources()
@@ -588,6 +622,8 @@ uniform vec3 uCameraPosition;
 uniform vec3 uFogColor;
 uniform vec2 uFogParams;
 uniform float uTime;
+uniform int uFogEnabled;
+uniform int uLightingEnabled;
 
 out vec4 FragColor;
 
@@ -609,23 +645,31 @@ void main()
         discard;
     }
 
-    vec3 normal = normalize(vNormal);
-    vec3 lightDir = normalize(-uLightDirection);
-    vec3 viewDir = normalize(uCameraPosition - vWorldPos);
-    vec3 halfDir = normalize(lightDir + viewDir);
+    vec3 lighting = color.rgb;
+    if (uLightingEnabled != 0)
+    {
+        vec3 normal = normalize(vNormal);
+        vec3 lightDir = normalize(-uLightDirection);
+        vec3 viewDir = normalize(uCameraPosition - vWorldPos);
+        vec3 halfDir = normalize(lightDir + viewDir);
 
-    float diffuse = max(dot(normal, lightDir), 0.0);
-    float ambient = 0.35;
-    float emissiveBoost = ((uMaterialFlags & 16) != 0) ? 0.35 : 0.0;
-    float specularWeight = ((uMaterialFlags & 3) != 0) ? 0.45 : 0.20;
-    float shininess = ((uMaterialFlags & 1) != 0) ? 48.0 : 24.0;
-    float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specularWeight;
+        float diffuse = max(dot(normal, lightDir), 0.0);
+        float ambient = 0.35;
+        float emissiveBoost = ((uMaterialFlags & 16) != 0) ? 0.35 : 0.0;
+        float specularWeight = ((uMaterialFlags & 3) != 0) ? 0.45 : 0.20;
+        float shininess = ((uMaterialFlags & 1) != 0) ? 48.0 : 24.0;
+        float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specularWeight;
 
-    vec3 lighting = color.rgb * (ambient + diffuse * 0.65) + emissiveBoost * color.rgb + specular;
+        lighting = color.rgb * (ambient + diffuse * 0.65) + emissiveBoost * color.rgb + specular;
+    }
 
-    float distanceToCamera = length(uCameraPosition - vWorldPos);
-    float fogFactor = exp(-pow(distanceToCamera * uFogParams.x, uFogParams.y));
-    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    float fogFactor = 1.0;
+    if (uFogEnabled != 0)
+    {
+        float distanceToCamera = length(uCameraPosition - vWorldPos);
+        fogFactor = exp(-pow(distanceToCamera * uFogParams.x, uFogParams.y));
+        fogFactor = clamp(fogFactor, 0.0, 1.0);
+    }
     vec3 finalColor = mix(uFogColor, lighting, fogFactor);
 
     FragColor = vec4(finalColor, color.a);

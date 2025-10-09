@@ -21,15 +21,31 @@ internal sealed class TerrainGlViewer : UserControl
     private readonly OrbitCamera _camera = new();
     private readonly TerrainRenderer3D _renderer = new();
     private readonly ObjectRenderer3D _objectRenderer = new();
+    private readonly SkyRenderer _skyRenderer = new();
     private readonly System.Windows.Forms.Timer _inputTimer;
     private readonly Stopwatch _deltaWatch = Stopwatch.StartNew();
     private readonly HashSet<Keys> _keys = new();
+    private readonly ToolTip _toolTip = new();
+    private readonly CheckBox _terrainToggle;
+    private readonly CheckBox _objectToggle;
+    private readonly CheckBox _fogToggle;
+    private readonly CheckBox _skyToggle;
+    private readonly CheckBox _lightingToggle;
+    private readonly CheckBox _animationToggle;
+    private readonly CheckBox _gameModeToggle;
+    private bool _showTerrain = true;
+    private bool _showObjects = true;
+    private bool _fogEnabled = true;
+    private bool _skyEnabled = true;
+    private bool _lightingEnabled = true;
+    private bool _animationsEnabled = true;
     private TerrainMesh? _mesh;
     private bool _contextReady;
     private bool _rotating;
     private bool _panning;
     private Point _lastMouse;
     private bool _flightMode;
+    private bool _suppressGameModeEvent;
     private float _flightYaw;
     private float _flightPitch;
     private float _flightSpeed = 1000f;
@@ -53,7 +69,86 @@ internal sealed class TerrainGlViewer : UserControl
             TabStop = true,
         };
 
-        Controls.Add(_glControl);
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+        };
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        Controls.Add(layout);
+
+        var optionsPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Padding = new Padding(8, 4, 8, 4),
+            Margin = new Padding(0),
+        };
+
+        _terrainToggle = CreateToggle("Terreno", (_, _) =>
+        {
+            _showTerrain = _terrainToggle.Checked;
+            _glControl.Invalidate();
+        }, true);
+        _objectToggle = CreateToggle("Objetos", (_, _) =>
+        {
+            _showObjects = _objectToggle.Checked;
+            _glControl.Invalidate();
+        }, true);
+        _fogToggle = CreateToggle("Névoa", (_, _) =>
+        {
+            _fogEnabled = _fogToggle.Checked;
+            ApplyRenderingSettings();
+        }, true);
+        _skyToggle = CreateToggle("Céu", (_, _) =>
+        {
+            _skyEnabled = _skyToggle.Checked;
+            _glControl.Invalidate();
+        }, true);
+        _lightingToggle = CreateToggle("Iluminação", (_, _) =>
+        {
+            _lightingEnabled = _lightingToggle.Checked;
+            ApplyRenderingSettings();
+        }, true);
+        _animationToggle = CreateToggle("Animações", (_, _) =>
+        {
+            _animationsEnabled = _animationToggle.Checked;
+            ApplyRenderingSettings();
+        }, true);
+        _gameModeToggle = CreateToggle("Modo jogo (F)", GameModeToggleChanged, false);
+
+        optionsPanel.Controls.AddRange(new Control[]
+        {
+            _terrainToggle,
+            _objectToggle,
+            _fogToggle,
+            _skyToggle,
+            _lightingToggle,
+            _animationToggle,
+            _gameModeToggle,
+        });
+
+        layout.Controls.Add(optionsPanel, 0, 0);
+        _glControl.Margin = new Padding(0);
+        layout.Controls.Add(_glControl, 0, 1);
+
+        _toolTip.SetToolTip(_terrainToggle, "Exibe ou oculta a malha do terreno.");
+        _toolTip.SetToolTip(_objectToggle, "Instancia os modelos BMD carregados.");
+        _toolTip.SetToolTip(_fogToggle, "Alterna a névoa de distância.");
+        _toolTip.SetToolTip(_skyToggle, "Alterna o gradiente de céu.");
+        _toolTip.SetToolTip(_lightingToggle, "Aplica iluminação difusa e especular.");
+        _toolTip.SetToolTip(_animationToggle, "Reproduz animações dos objetos.");
+        _toolTip.SetToolTip(_gameModeToggle, "Ativa o modo de navegação livre com câmera em primeira pessoa.");
+        _toolTip.SetToolTip(_glControl,
+            "Modo órbita: botão esquerdo para orbitar, direito para pan, roda para zoom.\n" +
+            "Modo jogo: marque a caixa ou pressione F. Use WASD para mover, E/Espaço para subir, Q para descer, " +
+            "Shift acelera e Ctrl desacelera.");
+
+        _skyRenderer.Configure(DefaultFogColor);
 
         _glControl.Load += HandleLoad;
         _glControl.Resize += HandleResize;
@@ -83,6 +178,8 @@ internal sealed class TerrainGlViewer : UserControl
             _inputTimer.Dispose();
             _renderer.Dispose();
             _objectRenderer.Dispose();
+            _skyRenderer.Dispose();
+            _toolTip.Dispose();
             _glControl.Dispose();
         }
         base.Dispose(disposing);
@@ -93,12 +190,15 @@ internal sealed class TerrainGlViewer : UserControl
         if (world is null)
         {
             _mesh = null;
-            _renderer.UpdateData(null, null, null, DefaultLightDirection, DefaultFogColor, DefaultFogParams);
+            _renderer.UpdateData(null, null, null, DefaultLightDirection, DefaultFogColor, DefaultFogParams, _fogEnabled, _lightingEnabled);
             _objectRenderer.UpdateWorld(null);
-            _objectRenderer.ConfigureEnvironment(DefaultLightDirection, DefaultFogColor, DefaultFogParams);
+            _objectRenderer.ConfigureEnvironment(DefaultLightDirection, DefaultFogColor, DefaultFogParams, _fogEnabled, _lightingEnabled);
+            _skyRenderer.Configure(DefaultFogColor);
             _flightMode = false;
             _rotating = false;
             _panning = false;
+            UpdateGameModeToggle();
+            ApplyRenderingSettings();
             if (_contextReady)
             {
                 _glControl.MakeCurrent();
@@ -119,9 +219,10 @@ internal sealed class TerrainGlViewer : UserControl
         var lightMap = world.Visual?.LightMap;
         var fogColor = EstimateFogColor(terrainTexture ?? world.Visual?.CompositeTexture, context);
         var fogParams = EstimateFogParams(context);
-        _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection, fogColor, fogParams);
+        _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection, fogColor, fogParams, _fogEnabled, _lightingEnabled);
         _objectRenderer.UpdateWorld(world);
-        _objectRenderer.ConfigureEnvironment(lightDirection, fogColor, fogParams);
+        _objectRenderer.ConfigureEnvironment(lightDirection, fogColor, fogParams, _fogEnabled, _lightingEnabled);
+        _skyRenderer.Configure(fogColor);
         ResetCamera();
 
         if (_contextReady)
@@ -131,6 +232,8 @@ internal sealed class TerrainGlViewer : UserControl
             _objectRenderer.EnsureResources();
             _glControl.Invalidate();
         }
+
+        ApplyRenderingSettings();
     }
 
     private void ResetCamera()
@@ -151,6 +254,8 @@ internal sealed class TerrainGlViewer : UserControl
         _rotating = false;
         _panning = false;
         SyncFlightFromOrbit();
+        UpdateGameModeToggle();
+        _glControl.Cursor = Cursors.Default;
     }
 
     private void HandleLoad(object? sender, EventArgs e)
@@ -184,8 +289,16 @@ internal sealed class TerrainGlViewer : UserControl
         }
 
         _glControl.MakeCurrent();
+        var clearColor = _skyEnabled ? _skyRenderer.BottomColor : new Vector3(0.05f, 0.07f, 0.11f);
+        GL.ClearColor(clearColor.X, clearColor.Y, clearColor.Z, 1f);
         GL.Viewport(0, 0, Math.Max(1, _glControl.Width), Math.Max(1, _glControl.Height));
         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
+
+        if (_skyEnabled)
+        {
+            _skyRenderer.EnsureResources();
+            _skyRenderer.Render();
+        }
 
         if (_mesh is null)
         {
@@ -198,10 +311,17 @@ internal sealed class TerrainGlViewer : UserControl
         var projection = _camera.ProjectionMatrix(aspect);
         var cameraPosition = _flightMode ? _flightPosition : _camera.Position;
 
-        _renderer.EnsureResources();
-        _renderer.Render(view, projection, cameraPosition);
-        _objectRenderer.EnsureResources();
-        _objectRenderer.Render(view, projection, cameraPosition);
+        if (_showTerrain)
+        {
+            _renderer.EnsureResources();
+            _renderer.Render(view, projection, cameraPosition);
+        }
+
+        if (_showObjects)
+        {
+            _objectRenderer.EnsureResources();
+            _objectRenderer.Render(view, projection, cameraPosition);
+        }
 
         _glControl.SwapBuffers();
     }
@@ -286,7 +406,7 @@ internal sealed class TerrainGlViewer : UserControl
         _keys.Add(e.KeyCode);
         if (e.KeyCode == Keys.F)
         {
-            ToggleFlightMode();
+            SetFlightMode(!_flightMode);
             e.Handled = true;
         }
         else if (e.KeyCode == Keys.R)
@@ -296,6 +416,7 @@ internal sealed class TerrainGlViewer : UserControl
             {
                 SyncFlightFromOrbit();
             }
+            UpdateGameModeToggle();
             e.Handled = true;
         }
     }
@@ -327,7 +448,7 @@ internal sealed class TerrainGlViewer : UserControl
 
         _renderer.AdvanceTime(deltaTime);
         var updated = _flightMode ? UpdateFlight(deltaTime) : UpdateOrbit(deltaTime);
-        var animated = _objectRenderer.Update(deltaTime);
+        var animated = _showObjects && _objectRenderer.Update(deltaTime);
         if (updated || animated)
         {
             _glControl.Invalidate();
@@ -415,7 +536,7 @@ internal sealed class TerrainGlViewer : UserControl
         {
             move += right;
         }
-        if (IsKeyDown(Keys.E))
+        if (IsKeyDown(Keys.E) || IsKeyDown(Keys.Space))
         {
             move += up;
         }
@@ -478,26 +599,34 @@ internal sealed class TerrainGlViewer : UserControl
 
     private bool IsKeyDown(Keys key) => _keys.Contains(key);
 
-    private void ToggleFlightMode()
+    private void SetFlightMode(bool enabled)
     {
-        if (_flightMode)
+        if (_flightMode == enabled)
         {
-            _flightMode = false;
+            return;
+        }
+
+        if (enabled)
+        {
+            SyncFlightFromOrbit();
+            _flightMode = true;
+            _glControl.Cursor = Cursors.Cross;
+        }
+        else
+        {
             var forward = GetFlightForward();
             _camera.Azimuth = MathF.Atan2(-forward.Z, -forward.X);
             _camera.Elevation = Math.Clamp(MathF.Asin(-forward.Y), -1.2f, 1.2f);
             var distance = Math.Clamp(_camera.Distance, 200f, 200000f);
             _camera.Distance = distance;
             _camera.Target = _flightPosition + forward * distance;
-        }
-        else
-        {
-            SyncFlightFromOrbit();
-            _flightMode = true;
+            _flightMode = false;
+            _glControl.Cursor = Cursors.Default;
         }
 
         _rotating = false;
         _panning = false;
+        UpdateGameModeToggle();
     }
 
     private void SyncFlightFromOrbit()
@@ -507,6 +636,51 @@ internal sealed class TerrainGlViewer : UserControl
         _flightYaw = MathF.Atan2(forward.Z, forward.X);
         _flightPitch = MathF.Asin(forward.Y);
         _flightSpeed = Math.Clamp(_camera.Distance, 200f, 200000f);
+    }
+
+    private void UpdateGameModeToggle()
+    {
+        if (_gameModeToggle is null)
+        {
+            return;
+        }
+
+        _suppressGameModeEvent = true;
+        _gameModeToggle.Checked = _flightMode;
+        _suppressGameModeEvent = false;
+    }
+
+    private void GameModeToggleChanged(object? sender, EventArgs e)
+    {
+        if (_suppressGameModeEvent)
+        {
+            return;
+        }
+
+        SetFlightMode(_gameModeToggle.Checked);
+    }
+
+    private void ApplyRenderingSettings()
+    {
+        _renderer.SetFogEnabled(_fogEnabled);
+        _renderer.SetLightingEnabled(_lightingEnabled);
+        _objectRenderer.SetFogEnabled(_fogEnabled);
+        _objectRenderer.SetLightingEnabled(_lightingEnabled);
+        _objectRenderer.SetAnimationsEnabled(_animationsEnabled);
+        _glControl.Invalidate();
+    }
+
+    private CheckBox CreateToggle(string text, EventHandler handler, bool isChecked)
+    {
+        var checkBox = new CheckBox
+        {
+            Text = text,
+            AutoSize = true,
+            Checked = isChecked,
+            Margin = new Padding(0, 0, 12, 0),
+        };
+        checkBox.CheckedChanged += handler;
+        return checkBox;
     }
 
     private static Vector3 EstimateFogColor(TextureImage? texture, MapContext context)
