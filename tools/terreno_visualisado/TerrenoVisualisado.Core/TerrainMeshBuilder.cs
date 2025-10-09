@@ -77,7 +77,10 @@ public static class TerrainMeshBuilder
                 var position = new Vector3(x * WorldLoader.TerrainScale, height, y * WorldLoader.TerrainScale);
                 var normal = ComputeNormal(terrain, x, y);
                 var u = x / (float)(size - 1);
-                var v = y / (float)(size - 1);
+                // Invert the V axis to match the top-down atlas orientation used by the
+                // original renderer. Without this flip the 3D view appears vertically
+                // mirrored compared to the in-game terrain.
+                var v = 1f - (y / (float)(size - 1));
 
                 vertices[offset + 0] = position.X;
                 vertices[offset + 1] = position.Y;
