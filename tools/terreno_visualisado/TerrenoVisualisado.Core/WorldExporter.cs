@@ -122,6 +122,7 @@ public static class WorldExporter
         {
             world.WorldPath,
             world.ObjectsPath,
+            world.ObjectDirectory,
             world.MapId,
             world.ObjectVersion,
             Terrain = new

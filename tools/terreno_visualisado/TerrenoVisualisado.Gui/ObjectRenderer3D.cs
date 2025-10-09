@@ -132,9 +132,8 @@ internal sealed class ObjectRenderer3D : IDisposable
 
         EnsureProgram();
 
-        var objectDirectory = Path.GetDirectoryName(_world.ObjectsPath);
         var context = MapContext.ForMapId(_world.MapId);
-        _textureLibrary = new TextureLibrary(_world.WorldPath, objectDirectory, context);
+        _textureLibrary = new TextureLibrary(_world.WorldPath, _world.ObjectDirectory, context);
 
         foreach (var entry in _world.ModelLibrary.Models)
         {

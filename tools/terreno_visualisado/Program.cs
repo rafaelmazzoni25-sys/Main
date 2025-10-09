@@ -49,6 +49,8 @@ internal static class Program
     {
         Console.WriteLine($"Diretório: {world.WorldPath}");
         Console.WriteLine($"Mapa detectado: {world.MapId}");
+        Console.WriteLine($"EncTerrain: {world.ObjectsPath}");
+        Console.WriteLine($"Object dir: {world.ObjectDirectory}");
         Console.WriteLine($"Objetos: {world.Objects.Count} (versão {world.ObjectVersion})");
 
         var tileCounts = new Dictionary<byte, int>();

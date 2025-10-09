@@ -338,7 +338,8 @@ public class MainForm : Form
         var builder = new StringBuilder();
         builder.AppendLine($"Mapa: {_world.MapId}");
         builder.AppendLine($"World: {_world.WorldPath}");
-        builder.AppendLine($"Objects: {_world.ObjectsPath}");
+        builder.AppendLine($"EncTerrain: {_world.ObjectsPath}");
+        builder.AppendLine($"Object dir: {_world.ObjectDirectory}");
         builder.AppendLine($"Objetos: {_world.Objects.Count} (versão {_world.ObjectVersion})");
 
         var tileCounts = new Dictionary<byte, int>();
@@ -457,13 +458,10 @@ public class MainForm : Form
             _mapIdNumeric.Value = mapId;
         }
 
-        if (string.IsNullOrWhiteSpace(_objectPath.Text))
+        var guess = GuessObjectDirectory(entry.Path);
+        if (guess is not null && !string.Equals(_objectPath.Text, guess, StringComparison.OrdinalIgnoreCase))
         {
-            var guess = GuessObjectDirectory(entry.Path);
-            if (guess is not null)
-            {
-                _objectPath.Text = guess;
-            }
+            _objectPath.Text = guess;
         }
     }
 
