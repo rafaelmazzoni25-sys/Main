@@ -9,24 +9,30 @@ internal sealed class TerrainRenderer3D : IDisposable
 {
     private TerrainMesh? _mesh;
     private TextureImage? _texture;
+    private TextureImage? _lightMap;
     private bool _dirty = true;
 
     private int _vao;
     private int _vbo;
     private int _ebo;
     private int _textureHandle;
+    private int _lightTextureHandle;
     private int _program;
     private int _uniformModel;
     private int _uniformView;
     private int _uniformProjection;
     private int _uniformLightDir;
     private int _uniformTexture;
+    private int _uniformLightMap;
+    private Vector3 _lightDirection = new(0.5f, -0.5f, 0.5f);
     private int _indexCount;
 
-    public void UpdateData(TerrainMesh? mesh, TextureImage? texture)
+    public void UpdateData(TerrainMesh? mesh, TextureImage? texture, TextureImage? lightMap, Vector3 lightDirection)
     {
         _mesh = mesh;
         _texture = texture;
+        _lightMap = lightMap;
+        _lightDirection = lightDirection;
         _dirty = true;
     }
 
@@ -51,6 +57,7 @@ internal sealed class TerrainRenderer3D : IDisposable
         _uniformProjection = GL.GetUniformLocation(_program, "uProjection");
         _uniformLightDir = GL.GetUniformLocation(_program, "uLightDirection");
         _uniformTexture = GL.GetUniformLocation(_program, "uTexture");
+        _uniformLightMap = GL.GetUniformLocation(_program, "uLightMap");
 
         _vao = GL.GenVertexArray();
         _vbo = GL.GenBuffer();
@@ -73,6 +80,7 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 6 * sizeof(float));
 
         var image = _texture ?? TextureImage.FromRgba(1, 1, new byte[] { 200, 200, 200, 255 });
+        GL.ActiveTexture(TextureUnit.Texture0);
         _textureHandle = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
@@ -82,6 +90,17 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
         GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, image.Width, image.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, image.Pixels);
         GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
+
+        var lightImage = _lightMap ?? TextureImage.FromRgba(1, 1, new byte[] { 255, 255, 255, 255 });
+        GL.ActiveTexture(TextureUnit.Texture1);
+        _lightTextureHandle = GL.GenTexture();
+        GL.BindTexture(TextureTarget.Texture2D, _lightTextureHandle);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
+        GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+        GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, lightImage.Width, lightImage.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, lightImage.Pixels);
 
         _indexCount = _mesh.Indices.Length;
         _dirty = false;
@@ -104,12 +123,15 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.UniformMatrix4(_uniformView, false, ref viewMatrix);
         GL.UniformMatrix4(_uniformProjection, false, ref projectionMatrix);
 
-        var lightDir = new Vector3(-0.4f, -1.0f, -0.6f);
-        GL.Uniform3(_uniformLightDir, lightDir);
+        GL.Uniform3(_uniformLightDir, _lightDirection);
 
         GL.ActiveTexture(TextureUnit.Texture0);
         GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
         GL.Uniform1(_uniformTexture, 0);
+
+        GL.ActiveTexture(TextureUnit.Texture1);
+        GL.BindTexture(TextureTarget.Texture2D, _lightTextureHandle);
+        GL.Uniform1(_uniformLightMap, 1);
 
         GL.BindVertexArray(_vao);
         GL.DrawElements(PrimitiveType.Triangles, _indexCount, DrawElementsType.UnsignedInt, 0);
@@ -148,6 +170,11 @@ internal sealed class TerrainRenderer3D : IDisposable
             GL.DeleteTexture(_textureHandle);
             _textureHandle = 0;
         }
+        if (_lightTextureHandle != 0)
+        {
+            GL.DeleteTexture(_lightTextureHandle);
+            _lightTextureHandle = 0;
+        }
         _indexCount = 0;
     }
 
@@ -176,6 +203,7 @@ in vec3 vNormal;
 in vec2 vTexCoord;
 
 uniform sampler2D uTexture;
+uniform sampler2D uLightMap;
 uniform vec3 uLightDirection;
 
 out vec4 FragColor;
@@ -183,11 +211,11 @@ out vec4 FragColor;
 void main()
 {
     vec3 normal = normalize(vNormal);
-    vec3 lightDir = normalize(-uLightDirection);
-    float diffuse = max(dot(normal, lightDir), 0.0);
-    vec4 color = texture(uTexture, vTexCoord);
-    float ambient = 0.3;
-    FragColor = vec4(color.rgb * (ambient + diffuse * 0.7), color.a);
+    float directional = clamp(dot(normal, uLightDirection) + 0.5, 0.0, 1.0);
+    vec4 baseColor = texture(uTexture, vTexCoord);
+    vec3 lightColor = texture(uLightMap, vTexCoord).rgb;
+    vec3 lit = baseColor.rgb * lightColor * directional;
+    FragColor = vec4(lit, baseColor.a);
 }";
 }
 

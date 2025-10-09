@@ -13,6 +13,8 @@ namespace TerrenoVisualisado.Gui;
 
 internal sealed class TerrainGlViewer : UserControl
 {
+    private static readonly Vector3 DefaultLightDirection = new(0.5f, -0.5f, 0.5f);
+
     private readonly GLControl _glControl;
     private readonly OrbitCamera _camera = new();
     private readonly TerrainRenderer3D _renderer = new();
@@ -89,7 +91,7 @@ internal sealed class TerrainGlViewer : UserControl
         if (world is null)
         {
             _mesh = null;
-            _renderer.UpdateData(null, null);
+            _renderer.UpdateData(null, null, null, DefaultLightDirection);
             _objectRenderer.UpdateWorld(null);
             _flightMode = false;
             _rotating = false;
@@ -105,8 +107,13 @@ internal sealed class TerrainGlViewer : UserControl
         }
 
         _mesh = TerrainMeshBuilder.Build(world.Terrain);
-        var terrainTexture = world.Visual?.LitCompositeTexture ?? world.Visual?.CompositeTexture;
-        _renderer.UpdateData(_mesh, terrainTexture);
+        var context = MapContext.ForMapId(world.MapId);
+        var lightDirection = context.IsBattleCastle
+            ? new Vector3(0.5f, -1.0f, 1.0f)
+            : DefaultLightDirection;
+        var terrainTexture = world.Visual?.CompositeTexture ?? world.Visual?.LitCompositeTexture;
+        var lightMap = world.Visual?.LightMap;
+        _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection);
         _objectRenderer.UpdateWorld(world);
         ResetCamera();
 
