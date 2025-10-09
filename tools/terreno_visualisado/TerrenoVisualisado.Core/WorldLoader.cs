@@ -34,7 +34,7 @@ public sealed class WorldLoader
 
         var attributesPath = ResolveTerrainFile(worldDirectory, options.MapId, ".att");
         var mappingPath = ResolveTerrainFile(worldDirectory, options.MapId, ".map");
-        var objectsPath = ResolveObjectsPath(worldDirectory, options.ObjectRoot, options.MapId);
+        var (objectsPath, objectDirectory) = ResolveObjectResources(worldDirectory, options.ObjectRoot, options.MapId);
         var heightPath = ResolveHeightPath(worldDirectory, options.ForceExtendedHeight);
         var modelNames = LoadModelNames(options.EnumPath);
 
@@ -45,8 +45,8 @@ public sealed class WorldLoader
         var mapContext = MapContext.ForMapId(resolvedMapId);
         AlignObjectsToTerrain(objects, terrain);
 
-        var materialLibrary = new MaterialStateLibrary(worldDirectory, new[] { objectsPath });
-        var textureLibrary = new TextureLibrary(worldDirectory, objectsPath, mapContext);
+        var materialLibrary = new MaterialStateLibrary(worldDirectory, new[] { objectDirectory });
+        var textureLibrary = new TextureLibrary(worldDirectory, objectDirectory, mapContext);
         var tileIndices = new HashSet<byte>();
         foreach (var tile in terrain.Layer1)
         {
@@ -93,15 +93,27 @@ public sealed class WorldLoader
             SpecialTextures = new Dictionary<string, string?>(specialTextures, StringComparer.OrdinalIgnoreCase),
         };
 
-        var modelSearchRoots = new List<string>
+        var modelSearchRoots = new List<string>();
+        void AddSearchRoot(string? candidate)
         {
-            objectsPath,
-            worldDirectory,
-        };
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                return;
+            }
+            var full = Path.GetFullPath(candidate);
+            if (Directory.Exists(full) && !modelSearchRoots.Any(path => string.Equals(path, full, StringComparison.OrdinalIgnoreCase)))
+            {
+                modelSearchRoots.Add(full);
+            }
+        }
+
+        AddSearchRoot(objectDirectory);
+        AddSearchRoot(Path.GetDirectoryName(objectsPath));
+        AddSearchRoot(worldDirectory);
         var parent = Directory.GetParent(worldDirectory);
         if (parent != null)
         {
-            modelSearchRoots.Add(parent.FullName);
+            AddSearchRoot(parent.FullName);
         }
         var bmdLibrary = new BmdLibrary(modelSearchRoots, materialLibrary);
         var models = new Dictionary<short, BmdModel>();
@@ -139,6 +151,7 @@ public sealed class WorldLoader
         {
             WorldPath = Path.GetFullPath(worldDirectory),
             ObjectsPath = Path.GetFullPath(objectsPath),
+            ObjectDirectory = objectDirectory,
             MapId = resolvedMapId,
             ObjectVersion = version,
             Terrain = terrain,
@@ -422,28 +435,34 @@ public sealed class WorldLoader
         return map;
     }
 
-    private static string ResolveObjectsPath(string worldDirectory, string? objectRoot, int? mapId)
+    private static (string ObjectFile, string ObjectDirectory) ResolveObjectResources(string worldDirectory, string? objectRoot, int? mapId)
     {
-        if (!string.IsNullOrEmpty(objectRoot))
+        var normalizedRoot = NormalizeObjectRoot(objectRoot);
+        var guessedRoot = GuessObjectFolder(worldDirectory);
+
+        string? objectsFile = TryResolveObjectsInDirectory(worldDirectory, mapId);
+
+        if (objectsFile is null && normalizedRoot is not null)
         {
-            var explicitPath = ResolveTerrainFile(objectRoot, mapId, ".obj");
-            if (!string.IsNullOrEmpty(explicitPath))
-            {
-                return explicitPath;
-            }
+            objectsFile = TryResolveObjectsInDirectory(normalizedRoot, mapId);
         }
 
-        if (TryResolveObjectsInDirectory(worldDirectory, mapId) is { } fromWorld)
+        if (objectsFile is null && guessedRoot is not null && !PathsEqual(guessedRoot, normalizedRoot))
         {
-            return fromWorld;
+            objectsFile = TryResolveObjectsInDirectory(guessedRoot, mapId);
         }
 
-        if (GuessObjectFolder(worldDirectory) is { } guessed)
+        if (objectsFile is null)
         {
-            return ResolveTerrainFile(guessed, mapId, ".obj");
+            throw new FileNotFoundException("Arquivo EncTerrain*.obj não encontrado. Utilize --objects para informar a pasta correta.");
         }
 
-        throw new FileNotFoundException("Arquivo EncTerrain*.obj não encontrado. Utilize --objects para informar a pasta correta.");
+        var objectDirectory = normalizedRoot
+            ?? guessedRoot
+            ?? Path.GetDirectoryName(objectsFile)
+            ?? worldDirectory;
+
+        return (Path.GetFullPath(objectsFile), Path.GetFullPath(objectDirectory));
     }
 
     private static string? TryResolveObjectsInDirectory(string directory, int? mapId)
@@ -466,6 +485,43 @@ public sealed class WorldLoader
         }
 
         return null;
+    }
+
+    private static string? NormalizeObjectRoot(string? objectRoot)
+    {
+        if (string.IsNullOrWhiteSpace(objectRoot))
+        {
+            return null;
+        }
+
+        var full = Path.GetFullPath(objectRoot);
+        if (Directory.Exists(full))
+        {
+            return full;
+        }
+
+        if (File.Exists(full))
+        {
+            var directory = Path.GetDirectoryName(full);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                return Path.GetFullPath(directory);
+            }
+        }
+
+        throw new DirectoryNotFoundException($"Diretório inválido: {objectRoot}");
+    }
+
+    private static bool PathsEqual(string? left, string? right)
+    {
+        if (left is null || right is null)
+        {
+            return false;
+        }
+
+        return string.Equals(Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveHeightPath(string worldDirectory, bool preferExtended)
@@ -654,6 +710,7 @@ public sealed class WorldData
 {
     public string WorldPath { get; init; } = string.Empty;
     public string ObjectsPath { get; init; } = string.Empty;
+    public string ObjectDirectory { get; init; } = string.Empty;
     public int MapId { get; init; }
     public int ObjectVersion { get; init; }
     public TerrainData Terrain { get; init; } = null!;

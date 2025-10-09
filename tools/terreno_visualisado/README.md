@@ -79,7 +79,7 @@ dotnet run --project tools\terreno_visualisado\TerrenoVisualisado.csproj -- \
 Opções principais:
 
 * `--world <pasta>`: diretório que contém `EncTerrain*.map/.att` e `TerrainHeight.OZB`.
-* `--objects <pasta>`: diretório `ObjectX` com o `EncTerrain*.obj` correspondente (opcional; na ausência deste parâmetro, o visualizador procura os objetos dentro do próprio `WorldX`).
+* `--objects <pasta>`: diretório `ObjectX` correspondente (opcional; na ausência deste parâmetro, o visualizador tenta localizar automaticamente uma pasta `Object*` irmã do `World*`).
 * `--map <id>`: força o ID numérico usado nos arquivos `EncTerrain`.
 * `--enum <arquivo>`: caminho para o `_enum.h` para exibir o nome textual dos objetos.
 * `--height-scale <valor>`: fator aplicado ao `TerrainHeight.OZB` clássico.
@@ -98,7 +98,9 @@ O projeto `TerrenoVisualisado.Gui` oferece uma interface WinForms para
 visualizar rapidamente as camadas carregadas, alternar entre altura, layers,
 atributos e alfa, além de sobrepor os objetos estáticos nas posições corretas.
 A tela principal permite selecionar as pastas do mundo e dos objetos, informar
-um `EnumModelType.eum` opcional e ajustar escala/ID do mapa. Após o carregamento
+um `EnumModelType.eum` opcional e ajustar escala/ID do mapa. Ao escolher um
+`World*`, o campo de objetos é preenchido automaticamente com a pasta `Object*`
+irmã correspondente (quando encontrada). Após o carregamento
 é possível exportar o mesmo JSON gerado pelo utilitário de linha de comando.
 O repositório inclui uma versão gerada automaticamente em `data/EnumModelType.eum`
 — utilize-a diretamente ou regenere o arquivo executando
