@@ -22,6 +22,9 @@ internal sealed class ObjectRenderer3D : IDisposable
     private bool _dirty = true;
     private bool _hasAnimatedModels;
     private float _animationTime;
+    private Vector3 _lightDirection = new(-0.4f, -1.0f, -0.6f);
+    private Vector3 _fogColor = new(0.23f, 0.28f, 0.34f);
+    private Vector2 _fogParams = new(0.00045f, 1.35f);
 
     private int _program;
     private int _uniformModel;
@@ -32,11 +35,22 @@ internal sealed class ObjectRenderer3D : IDisposable
     private int _uniformAlphaCutoff;
     private int _uniformMaterialFlags;
     private int _uniformTexture;
+    private int _uniformCameraPosition;
+    private int _uniformFogColor;
+    private int _uniformFogParams;
+    private int _uniformTime;
 
     public void UpdateWorld(WorldData? world)
     {
         _world = world;
         _dirty = true;
+    }
+
+    public void ConfigureEnvironment(Vector3 lightDirection, Vector3 fogColor, Vector2 fogParams)
+    {
+        _lightDirection = lightDirection;
+        _fogColor = fogColor;
+        _fogParams = fogParams;
     }
 
     public bool Update(float deltaTime)
@@ -66,7 +80,7 @@ internal sealed class ObjectRenderer3D : IDisposable
         }
     }
 
-    public void Render(Matrix4 view, Matrix4 projection)
+    public void Render(Matrix4 view, Matrix4 projection, Vector3 cameraPosition)
     {
         if (_world is null || _program == 0 || _modelResources.Count == 0)
         {
@@ -76,8 +90,11 @@ internal sealed class ObjectRenderer3D : IDisposable
         GL.UseProgram(_program);
         GL.UniformMatrix4(_uniformView, false, ref view);
         GL.UniformMatrix4(_uniformProjection, false, ref projection);
-        var lightDir = new Vector3(-0.4f, -1.0f, -0.6f);
-        GL.Uniform3(_uniformLightDirection, lightDir);
+        GL.Uniform3(_uniformLightDirection, _lightDirection);
+        GL.Uniform3(_uniformCameraPosition, cameraPosition);
+        GL.Uniform3(_uniformFogColor, _fogColor);
+        GL.Uniform2(_uniformFogParams, _fogParams);
+        GL.Uniform1(_uniformTime, _animationTime);
 
         foreach (var instance in _world.Objects)
         {
@@ -126,6 +143,8 @@ internal sealed class ObjectRenderer3D : IDisposable
 
         if (_world is null)
         {
+            _hasAnimatedModels = false;
+            _animationTime = 0f;
             _dirty = false;
             return;
         }
@@ -174,6 +193,10 @@ internal sealed class ObjectRenderer3D : IDisposable
         _uniformAlphaCutoff = GL.GetUniformLocation(_program, "uAlphaCutoff");
         _uniformMaterialFlags = GL.GetUniformLocation(_program, "uMaterialFlags");
         _uniformTexture = GL.GetUniformLocation(_program, "uTexture");
+        _uniformCameraPosition = GL.GetUniformLocation(_program, "uCameraPosition");
+        _uniformFogColor = GL.GetUniformLocation(_program, "uFogColor");
+        _uniformFogParams = GL.GetUniformLocation(_program, "uFogParams");
+        _uniformTime = GL.GetUniformLocation(_program, "uTime");
     }
 
     private void ReleaseResources()
@@ -534,6 +557,7 @@ uniform mat4 uBones[64];
 
 out vec3 vNormal;
 out vec2 vTexCoord;
+out vec3 vWorldPos;
 
 void main()
 {
@@ -547,23 +571,39 @@ void main()
 
     vNormal = worldNormal;
     vTexCoord = aTexCoord;
+    vWorldPos = worldPosition.xyz;
     gl_Position = uProjection * uView * worldPosition;
 }";
 
     private const string FragmentShaderSource = @"#version 330 core
 in vec3 vNormal;
 in vec2 vTexCoord;
+in vec3 vWorldPos;
 
 uniform sampler2D uTexture;
 uniform vec3 uLightDirection;
 uniform float uAlphaCutoff;
 uniform int uMaterialFlags;
+uniform vec3 uCameraPosition;
+uniform vec3 uFogColor;
+uniform vec2 uFogParams;
+uniform float uTime;
 
 out vec4 FragColor;
 
 void main()
 {
-    vec4 color = texture(uTexture, vTexCoord);
+    vec2 animatedUv = vTexCoord;
+    if ((uMaterialFlags & 1) != 0)
+    {
+        animatedUv += vec2(uTime * 0.02, uTime * 0.015);
+    }
+    else if ((uMaterialFlags & 2) != 0)
+    {
+        animatedUv += vec2(uTime * 0.01, -uTime * 0.02);
+    }
+
+    vec4 color = texture(uTexture, animatedUv);
     if (uAlphaCutoff > 0.0 && color.a < uAlphaCutoff)
     {
         discard;
@@ -571,10 +611,23 @@ void main()
 
     vec3 normal = normalize(vNormal);
     vec3 lightDir = normalize(-uLightDirection);
+    vec3 viewDir = normalize(uCameraPosition - vWorldPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+
     float diffuse = max(dot(normal, lightDir), 0.0);
     float ambient = 0.35;
     float emissiveBoost = ((uMaterialFlags & 16) != 0) ? 0.35 : 0.0;
-    vec3 lighting = color.rgb * (ambient + diffuse * 0.65) + emissiveBoost * color.rgb;
-    FragColor = vec4(lighting, color.a);
+    float specularWeight = ((uMaterialFlags & 3) != 0) ? 0.45 : 0.20;
+    float shininess = ((uMaterialFlags & 1) != 0) ? 48.0 : 24.0;
+    float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specularWeight;
+
+    vec3 lighting = color.rgb * (ambient + diffuse * 0.65) + emissiveBoost * color.rgb + specular;
+
+    float distanceToCamera = length(uCameraPosition - vWorldPos);
+    float fogFactor = exp(-pow(distanceToCamera * uFogParams.x, uFogParams.y));
+    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    vec3 finalColor = mix(uFogColor, lighting, fogFactor);
+
+    FragColor = vec4(finalColor, color.a);
 }";
 }

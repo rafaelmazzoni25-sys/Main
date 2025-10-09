@@ -23,9 +23,9 @@ public sealed class TerrainMesh
 
 public static class TerrainMeshBuilder
 {
-    private const int VertexStride = 8;
+    private const int BaseVertexStride = 8;
 
-    public static TerrainMesh Build(TerrainData terrain)
+    public static TerrainMesh Build(TerrainData terrain, uint[]? materialFlagsPerTile = null)
     {
         var size = WorldLoader.TerrainSize;
         if (terrain.Height.Length != size * size)
@@ -34,7 +34,9 @@ public static class TerrainMeshBuilder
         }
 
         var vertexCount = size * size;
-        var vertices = new float[vertexCount * VertexStride];
+        var includeMaterialFlags = materialFlagsPerTile is { Length: > 0 };
+        var vertexStride = includeMaterialFlags ? BaseVertexStride + 1 : BaseVertexStride;
+        var vertices = new float[vertexCount * vertexStride];
         var indexCount = (size - 1) * (size - 1) * 6;
         var indices = new uint[indexCount];
 
@@ -69,7 +71,7 @@ public static class TerrainMeshBuilder
             for (var x = 0; x < size; x++)
             {
                 var vertexIndex = y * size + x;
-                var offset = vertexIndex * VertexStride;
+                var offset = vertexIndex * vertexStride;
                 var height = SampleHeight(terrain, x, y);
 
                 var position = new Vector3(x * WorldLoader.TerrainScale, height, y * WorldLoader.TerrainScale);
@@ -85,6 +87,11 @@ public static class TerrainMeshBuilder
                 vertices[offset + 5] = normal.Z;
                 vertices[offset + 6] = u;
                 vertices[offset + 7] = v;
+                if (includeMaterialFlags)
+                {
+                    var materialIndex = Math.Clamp(vertexIndex, 0, materialFlagsPerTile!.Length - 1);
+                    vertices[offset + 8] = materialFlagsPerTile[materialIndex];
+                }
             }
         }
 
@@ -111,7 +118,7 @@ public static class TerrainMeshBuilder
         var extent = (size - 1) * WorldLoader.TerrainScale;
         var boundsMax = new Vector3(extent, maxHeight, extent);
 
-        return new TerrainMesh(vertices, indices, boundsMin, boundsMax, VertexStride);
+        return new TerrainMesh(vertices, indices, boundsMin, boundsMax, vertexStride);
     }
 
     private static float SampleHeight(TerrainData terrain, int x, int y)
