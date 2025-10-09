@@ -14,6 +14,8 @@ namespace TerrenoVisualisado.Gui;
 internal sealed class TerrainGlViewer : UserControl
 {
     private static readonly Vector3 DefaultLightDirection = new(0.5f, -0.5f, 0.5f);
+    private static readonly Vector3 DefaultFogColor = new(0.23f, 0.28f, 0.34f);
+    private static readonly Vector2 DefaultFogParams = new(0.00045f, 1.35f);
 
     private readonly GLControl _glControl;
     private readonly OrbitCamera _camera = new();
@@ -91,8 +93,9 @@ internal sealed class TerrainGlViewer : UserControl
         if (world is null)
         {
             _mesh = null;
-            _renderer.UpdateData(null, null, null, DefaultLightDirection);
+            _renderer.UpdateData(null, null, null, DefaultLightDirection, DefaultFogColor, DefaultFogParams);
             _objectRenderer.UpdateWorld(null);
+            _objectRenderer.ConfigureEnvironment(DefaultLightDirection, DefaultFogColor, DefaultFogParams);
             _flightMode = false;
             _rotating = false;
             _panning = false;
@@ -106,15 +109,19 @@ internal sealed class TerrainGlViewer : UserControl
             return;
         }
 
-        _mesh = TerrainMeshBuilder.Build(world.Terrain);
+        var materialFlags = world.Visual?.MaterialFlagsPerTile;
+        _mesh = TerrainMeshBuilder.Build(world.Terrain, materialFlags);
         var context = MapContext.ForMapId(world.MapId);
         var lightDirection = context.IsBattleCastle
             ? new Vector3(0.5f, -1.0f, 1.0f)
             : DefaultLightDirection;
-        var terrainTexture = world.Visual?.CompositeTexture ?? world.Visual?.LitCompositeTexture;
+        var terrainTexture = world.Visual?.LitCompositeTexture ?? world.Visual?.CompositeTexture;
         var lightMap = world.Visual?.LightMap;
-        _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection);
+        var fogColor = EstimateFogColor(terrainTexture ?? world.Visual?.CompositeTexture, context);
+        var fogParams = EstimateFogParams(context);
+        _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection, fogColor, fogParams);
         _objectRenderer.UpdateWorld(world);
+        _objectRenderer.ConfigureEnvironment(lightDirection, fogColor, fogParams);
         ResetCamera();
 
         if (_contextReady)
@@ -189,11 +196,12 @@ internal sealed class TerrainGlViewer : UserControl
         var aspect = _glControl.Width / (float)Math.Max(1, _glControl.Height);
         var view = _flightMode ? GetFlightViewMatrix() : _camera.ViewMatrix;
         var projection = _camera.ProjectionMatrix(aspect);
+        var cameraPosition = _flightMode ? _flightPosition : _camera.Position;
 
         _renderer.EnsureResources();
-        _renderer.Render(view, projection);
+        _renderer.Render(view, projection, cameraPosition);
         _objectRenderer.EnsureResources();
-        _objectRenderer.Render(view, projection);
+        _objectRenderer.Render(view, projection, cameraPosition);
 
         _glControl.SwapBuffers();
     }
@@ -317,6 +325,7 @@ internal sealed class TerrainGlViewer : UserControl
         var deltaTime = (float)_deltaWatch.Elapsed.TotalSeconds;
         _deltaWatch.Restart();
 
+        _renderer.AdvanceTime(deltaTime);
         var updated = _flightMode ? UpdateFlight(deltaTime) : UpdateOrbit(deltaTime);
         var animated = _objectRenderer.Update(deltaTime);
         if (updated || animated)
@@ -498,5 +507,103 @@ internal sealed class TerrainGlViewer : UserControl
         _flightYaw = MathF.Atan2(forward.Z, forward.X);
         _flightPitch = MathF.Asin(forward.Y);
         _flightSpeed = Math.Clamp(_camera.Distance, 200f, 200000f);
+    }
+
+    private static Vector3 EstimateFogColor(TextureImage? texture, MapContext context)
+    {
+        var baseColor = texture is null ? DefaultFogColor : Vector3.Lerp(DefaultFogColor, SampleAverageColor(texture), 0.6f);
+
+        if (context.IsKarutan)
+        {
+            baseColor = Vector3.Lerp(baseColor, new Vector3(0.26f, 0.20f, 0.14f), 0.7f);
+        }
+        else if (context.IsBattleCastle)
+        {
+            baseColor = Vector3.Lerp(baseColor, new Vector3(0.18f, 0.22f, 0.30f), 0.5f);
+        }
+        else if (context.IsCryWolf)
+        {
+            baseColor = Vector3.Lerp(baseColor, new Vector3(0.22f, 0.27f, 0.36f), 0.4f);
+        }
+        else if (context.IsPkField)
+        {
+            baseColor = Vector3.Lerp(baseColor, new Vector3(0.32f, 0.24f, 0.19f), 0.5f);
+        }
+
+        return ClampColor(baseColor, 0.05f, 0.95f);
+    }
+
+    private static Vector2 EstimateFogParams(MapContext context)
+    {
+        var density = DefaultFogParams.X;
+        var gradient = DefaultFogParams.Y;
+
+        if (context.IsBattleCastle || context.IsCryWolf || context.IsDoppelGanger2)
+        {
+            density = 0.00060f;
+            gradient = 1.45f;
+        }
+        else if (context.IsKarutan)
+        {
+            density = 0.00035f;
+            gradient = 1.25f;
+        }
+        else if (context.IsPkField)
+        {
+            density = 0.00028f;
+            gradient = 1.15f;
+        }
+        else if (context.IsCursedTemple)
+        {
+            density = 0.00052f;
+            gradient = 1.40f;
+        }
+
+        return new Vector2(density, gradient);
+    }
+
+    private static Vector3 SampleAverageColor(TextureImage texture)
+    {
+        var pixels = texture.Pixels;
+        var width = Math.Max(1, texture.Width);
+        var height = Math.Max(1, texture.Height);
+        var stepX = Math.Max(1, width / 128);
+        var stepY = Math.Max(1, height / 128);
+        double r = 0;
+        double g = 0;
+        double b = 0;
+        var samples = 0;
+
+        for (var y = 0; y < height; y += stepY)
+        {
+            for (var x = 0; x < width; x += stepX)
+            {
+                var offset = (y * width + x) * 4;
+                if (offset + 2 >= pixels.Length)
+                {
+                    continue;
+                }
+                r += pixels[offset + 0];
+                g += pixels[offset + 1];
+                b += pixels[offset + 2];
+                samples++;
+            }
+        }
+
+        if (samples == 0)
+        {
+            return DefaultFogColor;
+        }
+
+        var inv = 1.0 / (samples * 255.0);
+        return new Vector3((float)(r * inv), (float)(g * inv), (float)(b * inv));
+    }
+
+    private static Vector3 ClampColor(Vector3 color, float min, float max)
+    {
+        return new Vector3(
+            MathHelper.Clamp(color.X, min, max),
+            MathHelper.Clamp(color.Y, min, max),
+            MathHelper.Clamp(color.Z, min, max));
     }
 }

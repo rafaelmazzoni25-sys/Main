@@ -25,15 +25,45 @@ internal sealed class TerrainRenderer3D : IDisposable
     private int _uniformTexture;
     private int _uniformLightMap;
     private Vector3 _lightDirection = new(0.5f, -0.5f, 0.5f);
+    private Vector3 _fogColor = new(0.23f, 0.28f, 0.34f);
+    private Vector2 _fogParams = new(0.00045f, 1.35f);
+    private int _uniformCameraPosition;
+    private int _uniformFogColor;
+    private int _uniformFogParams;
+    private int _uniformTime;
+    private float _elapsedTime;
     private int _indexCount;
 
-    public void UpdateData(TerrainMesh? mesh, TextureImage? texture, TextureImage? lightMap, Vector3 lightDirection)
+    public void UpdateData(
+        TerrainMesh? mesh,
+        TextureImage? texture,
+        TextureImage? lightMap,
+        Vector3 lightDirection,
+        Vector3 fogColor,
+        Vector2 fogParams)
     {
         _mesh = mesh;
         _texture = texture;
         _lightMap = lightMap;
         _lightDirection = lightDirection;
+        _fogColor = fogColor;
+        _fogParams = fogParams;
+        _elapsedTime = 0f;
         _dirty = true;
+    }
+
+    public void AdvanceTime(float deltaTime)
+    {
+        if (deltaTime <= 0f)
+        {
+            return;
+        }
+
+        _elapsedTime += deltaTime;
+        if (_elapsedTime > 7200f)
+        {
+            _elapsedTime -= 7200f;
+        }
     }
 
     public void EnsureResources()
@@ -58,6 +88,10 @@ internal sealed class TerrainRenderer3D : IDisposable
         _uniformLightDir = GL.GetUniformLocation(_program, "uLightDirection");
         _uniformTexture = GL.GetUniformLocation(_program, "uTexture");
         _uniformLightMap = GL.GetUniformLocation(_program, "uLightMap");
+        _uniformCameraPosition = GL.GetUniformLocation(_program, "uCameraPosition");
+        _uniformFogColor = GL.GetUniformLocation(_program, "uFogColor");
+        _uniformFogParams = GL.GetUniformLocation(_program, "uFogParams");
+        _uniformTime = GL.GetUniformLocation(_program, "uTime");
 
         _vao = GL.GenVertexArray();
         _vbo = GL.GenBuffer();
@@ -78,6 +112,15 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
         GL.EnableVertexAttribArray(2);
         GL.VertexAttribPointer(2, 2, VertexAttribPointerType.Float, false, stride, 6 * sizeof(float));
+        if (_mesh.VertexStride > 8)
+        {
+            GL.EnableVertexAttribArray(3);
+            GL.VertexAttribPointer(3, 1, VertexAttribPointerType.Float, false, stride, 8 * sizeof(float));
+        }
+        else
+        {
+            GL.DisableVertexAttribArray(3);
+        }
 
         var image = _texture ?? TextureImage.FromRgba(1, 1, new byte[] { 200, 200, 200, 255 });
         GL.ActiveTexture(TextureUnit.Texture0);
@@ -106,7 +149,7 @@ internal sealed class TerrainRenderer3D : IDisposable
         _dirty = false;
     }
 
-    public void Render(Matrix4 view, Matrix4 projection)
+    public void Render(Matrix4 view, Matrix4 projection, Vector3 cameraPosition)
     {
         if (_mesh is null || _dirty)
         {
@@ -124,6 +167,10 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.UniformMatrix4(_uniformProjection, false, ref projectionMatrix);
 
         GL.Uniform3(_uniformLightDir, _lightDirection);
+        GL.Uniform3(_uniformCameraPosition, cameraPosition);
+        GL.Uniform3(_uniformFogColor, _fogColor);
+        GL.Uniform2(_uniformFogParams, _fogParams);
+        GL.Uniform1(_uniformTime, _elapsedTime);
 
         GL.ActiveTexture(TextureUnit.Texture0);
         GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
@@ -182,6 +229,7 @@ internal sealed class TerrainRenderer3D : IDisposable
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
+layout(location = 3) in float aMaterialFlags;
 
 uniform mat4 uModel;
 uniform mat4 uView;
@@ -189,33 +237,72 @@ uniform mat4 uProjection;
 
 out vec3 vNormal;
 out vec2 vTexCoord;
+out vec3 vWorldPos;
+flat out int vMaterialFlags;
 
 void main()
 {
     vec4 worldPosition = uModel * vec4(aPosition, 1.0);
     vNormal = mat3(uModel) * aNormal;
     vTexCoord = aTexCoord;
+    vWorldPos = worldPosition.xyz;
+    vMaterialFlags = int(aMaterialFlags + 0.5);
     gl_Position = uProjection * uView * worldPosition;
 }";
 
     private const string FragmentShaderSource = @"#version 330 core
 in vec3 vNormal;
 in vec2 vTexCoord;
+in vec3 vWorldPos;
+flat in int vMaterialFlags;
 
 uniform sampler2D uTexture;
 uniform sampler2D uLightMap;
 uniform vec3 uLightDirection;
+uniform vec3 uCameraPosition;
+uniform vec3 uFogColor;
+uniform vec2 uFogParams;
+uniform float uTime;
 
 out vec4 FragColor;
 
 void main()
 {
     vec3 normal = normalize(vNormal);
-    float directional = clamp(dot(normal, uLightDirection) + 0.5, 0.0, 1.0);
-    vec4 baseColor = texture(uTexture, vTexCoord);
-    vec3 lightColor = texture(uLightMap, vTexCoord).rgb;
-    vec3 lit = baseColor.rgb * lightColor * directional;
-    FragColor = vec4(lit, baseColor.a);
+    vec3 lightDir = normalize(-uLightDirection);
+    vec3 viewDir = normalize(uCameraPosition - vWorldPos);
+    vec3 halfDir = normalize(lightDir + viewDir);
+
+    vec2 animatedUv = vTexCoord;
+    if ((vMaterialFlags & 1) != 0)
+    {
+        animatedUv += vec2(uTime * 0.02, uTime * 0.015);
+    }
+    else if ((vMaterialFlags & 2) != 0)
+    {
+        animatedUv += vec2(uTime * 0.01, -uTime * 0.02);
+    }
+
+    vec4 baseColor = texture(uTexture, animatedUv);
+    vec3 lightColor = texture(uLightMap, animatedUv).rgb;
+
+    float diffuse = max(dot(normal, lightDir), 0.0);
+    float ambient = 0.35;
+    float emissive = ((vMaterialFlags & 16) != 0) ? 0.30 : 0.0;
+    float specStrength = ((vMaterialFlags & 3) != 0) ? 0.55 : 0.20;
+    float shininess = ((vMaterialFlags & 1) != 0) ? 48.0 : 24.0;
+    float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specStrength;
+
+    vec3 lit = baseColor.rgb * (ambient + diffuse * 0.75) * lightColor;
+    lit += specular * lightColor;
+    lit += emissive * baseColor.rgb;
+
+    float distanceToCamera = length(uCameraPosition - vWorldPos);
+    float fogFactor = exp(-pow(distanceToCamera * uFogParams.x, uFogParams.y));
+    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    vec3 finalColor = mix(uFogColor, lit, fogFactor);
+
+    FragColor = vec4(finalColor, baseColor.a);
 }";
 }
 
