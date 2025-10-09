@@ -132,7 +132,8 @@ public static class WorldExporter
                 Layer1 = world.Terrain.Layer1,
                 Layer2 = world.Terrain.Layer2,
                 Alpha = world.Terrain.Alpha,
-                Attributes = world.Terrain.Attributes,
+                Attributes = world.Terrain.HasAttributes ? world.Terrain.Attributes : Array.Empty<ushort>(),
+                world.Terrain.HasAttributes,
             },
             Objects = world.Objects.Select(obj => new
             {

@@ -26,6 +26,7 @@ public sealed class WorldLoader
         public string? EnumPath { get; init; }
         public bool ForceExtendedHeight { get; init; }
         public float? HeightScale { get; init; }
+        public bool LoadAttributes { get; init; } = true;
     }
 
     public WorldData Load(string worldDirectory, LoadOptions options)
@@ -37,7 +38,11 @@ public sealed class WorldLoader
 
         options.MapId ??= InferMapId(worldDirectory);
 
-        var attributesPath = ResolveTerrainFile(worldDirectory, options.MapId, ".att");
+        string? attributesPath = null;
+        if (options.LoadAttributes)
+        {
+            attributesPath = ResolveTerrainFile(worldDirectory, options.MapId, ".att");
+        }
         var mappingPath = ResolveTerrainFile(worldDirectory, options.MapId, ".map");
         var (objectsPath, objectDirectory) = ResolveObjectResources(worldDirectory, options.ObjectRoot, options.MapId);
         var heightResource = ResolveHeightResource(worldDirectory, options.ForceExtendedHeight, options.MapId);
@@ -332,17 +337,19 @@ public sealed class WorldLoader
         return objects;
     }
 
-    private static TerrainData LoadTerrain(string attributesPath, string mappingPath, string heightPath, bool isExtendedHeight, float? heightScale, out int attributeMapId, out int mappingMapId)
+    private static TerrainData LoadTerrain(string? attributesPath, string mappingPath, string heightPath, bool isExtendedHeight, float? heightScale, out int attributeMapId, out int mappingMapId)
     {
         var height = new float[TerrainSize * TerrainSize];
         var layer1 = new byte[TerrainSize * TerrainSize];
         var layer2 = new byte[TerrainSize * TerrainSize];
         var alpha = new float[TerrainSize * TerrainSize];
         var attributes = new ushort[TerrainSize * TerrainSize];
+        var hasAttributes = attributesPath is not null;
         float appliedScale;
         bool extended;
 
         // atributos
+        if (attributesPath is not null)
         {
             var raw = File.ReadAllBytes(attributesPath);
             var decrypted = MapCrypto.Decrypt(raw);
@@ -368,6 +375,11 @@ public sealed class WorldLoader
                     attributes[i] = BinaryPrimitives.ReadUInt16LittleEndian(span.Slice(i * 2, 2));
                 }
             }
+        }
+        else
+        {
+            attributeMapId = -1;
+            Array.Clear(attributes);
         }
 
         // mapping
@@ -440,7 +452,7 @@ public sealed class WorldLoader
             }
         }
 
-        return new TerrainData(height, layer1, layer2, alpha, attributes, extended, appliedScale);
+        return new TerrainData(height, layer1, layer2, alpha, attributes, hasAttributes, extended, appliedScale);
     }
 
     private static Dictionary<int, string> LoadModelNames(string? enumPath)
@@ -778,13 +790,14 @@ public sealed class WorldLoader
 
 public sealed class TerrainData
 {
-    public TerrainData(float[] height, byte[] layer1, byte[] layer2, float[] alpha, ushort[] attributes, bool usesExtendedHeight, float heightScale)
+    public TerrainData(float[] height, byte[] layer1, byte[] layer2, float[] alpha, ushort[] attributes, bool hasAttributes, bool usesExtendedHeight, float heightScale)
     {
         Height = height;
         Layer1 = layer1;
         Layer2 = layer2;
         Alpha = alpha;
         Attributes = attributes;
+        HasAttributes = hasAttributes;
         UsesExtendedHeight = usesExtendedHeight;
         HeightScale = heightScale;
     }
@@ -794,6 +807,7 @@ public sealed class TerrainData
     public byte[] Layer2 { get; }
     public float[] Alpha { get; }
     public ushort[] Attributes { get; }
+    public bool HasAttributes { get; }
     public bool UsesExtendedHeight { get; }
     public float HeightScale { get; private set; }
 

@@ -20,6 +20,7 @@ public class MainForm : Form
     private readonly CheckBox _customHeightScale;
     private readonly NumericUpDown _heightScaleNumeric;
     private readonly CheckBox _forceExtendedHeight;
+    private readonly CheckBox _loadAttributes;
     private readonly Button _loadButton;
     private readonly Button _exportButton;
     private readonly ComboBox _previewMode;
@@ -106,6 +107,7 @@ public class MainForm : Form
         _customHeightScale.CheckedChanged += (_, _) => _heightScaleNumeric.Enabled = _customHeightScale.Checked;
 
         _forceExtendedHeight = new CheckBox { Text = "Forçar TerrainHeightNew", AutoSize = true };
+        _loadAttributes = new CheckBox { Text = "Carregar atributos", AutoSize = true, Checked = true };
 
         _loadButton = new Button { Text = "Carregar", AutoSize = true };
         _loadButton.Click += (_, _) => LoadWorld();
@@ -150,6 +152,7 @@ public class MainForm : Form
         controlPanel.Controls.Add(_customHeightScale, 7, 1);
         controlPanel.Controls.Add(_heightScaleNumeric, 8, 1);
         controlPanel.Controls.Add(_forceExtendedHeight, 9, 1);
+        controlPanel.Controls.Add(_loadAttributes, 10, 1);
 
         var controlRow2 = new FlowLayoutPanel
         {
@@ -277,6 +280,7 @@ public class MainForm : Form
             ForceExtendedHeight = _forceExtendedHeight.Checked,
             HeightScale = _customHeightScale.Checked ? (float?)Convert.ToDouble(_heightScaleNumeric.Value) : null,
             MapId = _forceMapId.Checked ? (int?)Convert.ToInt32(_mapIdNumeric.Value) : null,
+            LoadAttributes = _loadAttributes.Checked,
         };
 
         try
@@ -359,16 +363,23 @@ public class MainForm : Form
             builder.AppendLine($"  {pair.Key:D3}: {pair.Value}");
         }
 
-        var attributeCounts = new Dictionary<ushort, int>();
-        foreach (var attr in _world.Terrain.Attributes)
+        if (_world.Terrain.HasAttributes)
         {
-            attributeCounts.TryGetValue(attr, out var count);
-            attributeCounts[attr] = count + 1;
+            var attributeCounts = new Dictionary<ushort, int>();
+            foreach (var attr in _world.Terrain.Attributes)
+            {
+                attributeCounts.TryGetValue(attr, out var count);
+                attributeCounts[attr] = count + 1;
+            }
+            builder.AppendLine("Atributos mais comuns:");
+            foreach (var pair in attributeCounts.OrderByDescending(kv => kv.Value).Take(8))
+            {
+                builder.AppendLine($"  0x{pair.Key:X3}: {pair.Value}");
+            }
         }
-        builder.AppendLine("Atributos mais comuns:");
-        foreach (var pair in attributeCounts.OrderByDescending(kv => kv.Value).Take(8))
+        else
         {
-            builder.AppendLine($"  0x{pair.Key:X3}: {pair.Value}");
+            builder.AppendLine("Atributos: não carregados");
         }
 
         _summary.Text = builder.ToString();

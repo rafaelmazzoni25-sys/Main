@@ -30,6 +30,7 @@ internal static class Program
                 EnumPath = options.EnumPath,
                 ForceExtendedHeight = options.ForceExtendedHeight,
                 HeightScale = options.HeightScale,
+                LoadAttributes = !options.SkipAttributes,
             });
 
             PrintSummary(world);
@@ -66,16 +67,23 @@ internal static class Program
             Console.WriteLine($"  Tile {tile:D3}: {count} ocorrências");
         }
 
-        var attributeCounts = new Dictionary<ushort, int>();
-        foreach (var attr in world.Terrain.Attributes)
+        if (world.Terrain.HasAttributes)
         {
-            attributeCounts.TryGetValue(attr, out var count);
-            attributeCounts[attr] = count + 1;
+            var attributeCounts = new Dictionary<ushort, int>();
+            foreach (var attr in world.Terrain.Attributes)
+            {
+                attributeCounts.TryGetValue(attr, out var count);
+                attributeCounts[attr] = count + 1;
+            }
+            Console.WriteLine("Atributos mais comuns:");
+            foreach (var (attr, count) in attributeCounts.OrderByDescending(kv => kv.Value).Take(8))
+            {
+                Console.WriteLine($"  0x{attr:X3}: {count} tiles");
+            }
         }
-        Console.WriteLine("Atributos mais comuns:");
-        foreach (var (attr, count) in attributeCounts.OrderByDescending(kv => kv.Value).Take(8))
+        else
         {
-            Console.WriteLine($"  0x{attr:X3}: {count} tiles");
+            Console.WriteLine("Atributos: não carregados");
         }
 
         var objectCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -147,6 +155,7 @@ internal static class Program
         Console.WriteLine("  --enum <arquivo>        Caminho para o arquivo _enum.h");
         Console.WriteLine("  --height-scale <valor>  Fator aplicado ao TerrainHeight.OZB");
         Console.WriteLine("  --extended-height       Usa TerrainHeightNew.OZB mesmo se o clássico existir");
+        Console.WriteLine("  --skip-attributes       Não lê EncTerrain*.att");
         Console.WriteLine("  --output <arquivo>      Nome do arquivo JSON de saída (padrão terrainsummary.json)");
         Console.WriteLine("  --help                  Mostra este resumo e sai");
         Console.WriteLine();
@@ -164,6 +173,7 @@ internal static class Program
         public bool ForceExtendedHeight { get; set; }
         public string? OutputPath { get; set; }
         public bool ShowHelp { get; set; }
+        public bool SkipAttributes { get; set; }
 
         public static CliOptions Parse(string[] args)
         {
@@ -202,6 +212,9 @@ internal static class Program
                         break;
                     case "--output":
                         options.OutputPath = RequireValue(args, ref i, arg);
+                        break;
+                    case "--skip-attributes":
+                        options.SkipAttributes = true;
                         break;
                     default:
                         throw new ArgumentException($"Argumento desconhecido: {arg}");

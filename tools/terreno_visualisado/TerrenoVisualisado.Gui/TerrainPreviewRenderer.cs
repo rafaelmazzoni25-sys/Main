@@ -20,6 +20,10 @@ internal static class TerrainPreviewRenderer
     public static Bitmap Render(WorldData world, PreviewMode mode, bool overlayObjects)
     {
         var size = WorldLoader.TerrainSize;
+        if (mode == PreviewMode.Attributes && !world.Terrain.HasAttributes)
+        {
+            return RenderMissingAttributesPlaceholder(size);
+        }
         if (mode == PreviewMode.Layer1 && world.Visual?.CompositeTexture is { } composite)
         {
             var bitmap = composite.ToBitmap();
@@ -68,6 +72,18 @@ internal static class TerrainPreviewRenderer
         }
 
         return result;
+    }
+
+    private static Bitmap RenderMissingAttributesPlaceholder(int size)
+    {
+        var bitmap = new Bitmap(size, size);
+        using var g = Graphics.FromImage(bitmap);
+        g.Clear(Color.FromArgb(64, 64, 64));
+        using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        using var brush = new SolidBrush(Color.White);
+        var rect = new RectangleF(0, 0, size, size);
+        g.DrawString("Atributos não carregados", SystemFonts.DefaultFont, brush, rect, format);
+        return bitmap;
     }
 
     private static void OverlayObjects(WorldData world, Bitmap bitmap)
