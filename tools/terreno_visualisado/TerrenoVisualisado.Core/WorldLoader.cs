@@ -226,7 +226,7 @@ public sealed class WorldLoader
             var tileX = obj.RawPosition.X / TerrainScale;
             var tileY = obj.RawPosition.Y / TerrainScale;
             var height = BilinearHeight(terrain, tileX, tileY);
-            obj.Position = new Vector3(obj.RawPosition.X, height, obj.RawPosition.Y);
+            obj.Position = new Vector3(obj.RawPosition.X, obj.RawPosition.Y, height);
         }
     }
 

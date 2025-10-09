@@ -247,11 +247,11 @@ internal sealed class TerrainGlViewer : UserControl
         }
 
         var extent = (WorldLoader.TerrainSize - 1) * WorldLoader.TerrainScale;
-        var center = new Vector3(extent * 0.5f, (_mesh.BoundsMin.Y + _mesh.BoundsMax.Y) * 0.5f, extent * 0.5f);
+        var center = new Vector3(extent * 0.5f, extent * 0.5f, (_mesh.BoundsMin.Z + _mesh.BoundsMax.Z) * 0.5f);
         _camera.Target = center;
         _camera.Azimuth = MathHelper.DegreesToRadians(45f);
         _camera.Elevation = MathHelper.DegreesToRadians(35f);
-        var radius = Math.Max(extent, _mesh.BoundsMax.Y - _mesh.BoundsMin.Y);
+        var radius = Math.Max(extent, _mesh.BoundsMax.Z - _mesh.BoundsMin.Z);
         _camera.Distance = Math.Max(1000f, radius * 1.2f);
         _flightMode = false;
         _rotating = false;
@@ -503,7 +503,7 @@ internal sealed class TerrainGlViewer : UserControl
     private bool UpdateFlight(float deltaTime)
     {
         var forward = GetFlightForward();
-        var right = Vector3.Cross(forward, Vector3.UnitY);
+        var right = Vector3.Cross(forward, Vector3.UnitZ);
         if (right.LengthSquared <= float.Epsilon)
         {
             right = Vector3.UnitX;
@@ -515,7 +515,7 @@ internal sealed class TerrainGlViewer : UserControl
         var up = Vector3.Cross(right, forward);
         if (up.LengthSquared <= float.Epsilon)
         {
-            up = Vector3.UnitY;
+            up = Vector3.UnitZ;
         }
         else
         {
@@ -588,7 +588,7 @@ internal sealed class TerrainGlViewer : UserControl
     {
         var forward = GetFlightForward();
         var target = _flightPosition + forward;
-        return Matrix4.LookAt(_flightPosition, target, Vector3.UnitY);
+        return Matrix4.LookAt(_flightPosition, target, Vector3.UnitZ);
     }
 
     private Vector3 GetFlightForward()
@@ -597,7 +597,7 @@ internal sealed class TerrainGlViewer : UserControl
         var sinPitch = MathF.Sin(_flightPitch);
         var cosYaw = MathF.Cos(_flightYaw);
         var sinYaw = MathF.Sin(_flightYaw);
-        return Vector3.Normalize(new Vector3(cosPitch * cosYaw, sinPitch, cosPitch * sinYaw));
+        return Vector3.Normalize(new Vector3(cosPitch * cosYaw, cosPitch * sinYaw, sinPitch));
     }
 
     private bool IsKeyDown(Keys key) => _keys.Contains(key);
@@ -618,8 +618,8 @@ internal sealed class TerrainGlViewer : UserControl
         else
         {
             var forward = GetFlightForward();
-            _camera.Azimuth = MathF.Atan2(-forward.Z, -forward.X);
-            _camera.Elevation = Math.Clamp(MathF.Asin(-forward.Y), -1.2f, 1.2f);
+            _camera.Azimuth = MathF.Atan2(-forward.Y, -forward.X);
+            _camera.Elevation = Math.Clamp(MathF.Asin(-forward.Z), -1.2f, 1.2f);
             var distance = Math.Clamp(_camera.Distance, 200f, 200000f);
             _camera.Distance = distance;
             _camera.Target = _flightPosition + forward * distance;
@@ -636,8 +636,8 @@ internal sealed class TerrainGlViewer : UserControl
     {
         _flightPosition = _camera.Position;
         var forward = _camera.Forward;
-        _flightYaw = MathF.Atan2(forward.Z, forward.X);
-        _flightPitch = MathF.Asin(forward.Y);
+        _flightYaw = MathF.Atan2(forward.Y, forward.X);
+        _flightPitch = MathF.Asin(forward.Z);
         _flightSpeed = Math.Clamp(_camera.Distance, 200f, 200000f);
     }
 

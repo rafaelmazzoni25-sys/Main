@@ -25,7 +25,7 @@ internal sealed class OrbitCamera
             var forward = Target - Position;
             if (forward.LengthSquared <= float.Epsilon)
             {
-                return -Vector3.UnitZ;
+                return -Vector3.UnitX;
             }
             return Vector3.Normalize(forward);
         }
@@ -36,7 +36,7 @@ internal sealed class OrbitCamera
         get
         {
             var forward = Forward;
-            var right = Vector3.Cross(forward, Vector3.UnitY);
+            var right = Vector3.Cross(forward, Vector3.UnitZ);
             if (right.LengthSquared <= float.Epsilon)
             {
                 return Vector3.UnitX;
@@ -54,13 +54,13 @@ internal sealed class OrbitCamera
             var up = Vector3.Cross(right, forward);
             if (up.LengthSquared <= float.Epsilon)
             {
-                return Vector3.UnitY;
+                return Vector3.UnitZ;
             }
             return Vector3.Normalize(up);
         }
     }
 
-    public Matrix4 ViewMatrix => Matrix4.LookAt(Position, Target, Vector3.UnitY);
+    public Matrix4 ViewMatrix => Matrix4.LookAt(Position, Target, Vector3.UnitZ);
 
     public Matrix4 ProjectionMatrix(float aspectRatio)
     {
@@ -74,6 +74,6 @@ internal sealed class OrbitCamera
         var sinElevation = MathF.Sin(Elevation);
         var cosAzimuth = MathF.Cos(Azimuth);
         var sinAzimuth = MathF.Sin(Azimuth);
-        return new Vector3(cosElevation * cosAzimuth, sinElevation, cosElevation * sinAzimuth);
+        return new Vector3(cosElevation * cosAzimuth, cosElevation * sinAzimuth, sinElevation);
     }
 }
