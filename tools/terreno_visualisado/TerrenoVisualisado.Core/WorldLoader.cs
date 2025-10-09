@@ -10,7 +10,11 @@ public sealed class WorldLoader
     public const int TerrainSize = 256;
     public const float TerrainScale = 100.0f;
     private const float DefaultClassicHeightScale = 1.5f;
+    private const float LoginSceneClassicHeightScale = 3.0f;
     private const float MinHeightBias = -500.0f;
+    private const long ClassicHeightMinSize = 4 + 1080 + (long)TerrainSize * TerrainSize;
+    private const long ExtendedHeightMinSize = 4 + 54 + (long)TerrainSize * TerrainSize * 3;
+    private const int LoginSceneMapId = 55;
     private const int ObjectRecordSize = 2 + (3 * 4) + (3 * 4) + 4;
 
     private static readonly byte[] BuxCode = { 0xFC, 0xCF, 0xAB };
@@ -36,14 +40,19 @@ public sealed class WorldLoader
         var attributesPath = ResolveTerrainFile(worldDirectory, options.MapId, ".att");
         var mappingPath = ResolveTerrainFile(worldDirectory, options.MapId, ".map");
         var (objectsPath, objectDirectory) = ResolveObjectResources(worldDirectory, options.ObjectRoot, options.MapId);
-        var heightPath = ResolveHeightPath(worldDirectory, options.ForceExtendedHeight);
+        var heightResource = ResolveHeightResource(worldDirectory, options.ForceExtendedHeight, options.MapId);
+        var heightPath = heightResource.Path;
         var modelNames = LoadModelNames(options.EnumPath);
 
-        var terrain = LoadTerrain(attributesPath, mappingPath, heightPath, options.ForceExtendedHeight, options.HeightScale, out var attributeMapId, out var mappingMapId);
+        var terrain = LoadTerrain(attributesPath, mappingPath, heightPath, heightResource.IsExtended, options.HeightScale, out var attributeMapId, out var mappingMapId);
         var objects = LoadObjects(objectsPath, modelNames, out var version, out var objectMapId);
 
         var resolvedMapId = options.MapId ?? (attributeMapId >= 0 ? attributeMapId : (mappingMapId >= 0 ? mappingMapId : objectMapId));
         var mapContext = MapContext.ForMapId(resolvedMapId);
+        if (!heightResource.IsExtended && !options.HeightScale.HasValue && resolvedMapId == LoginSceneMapId)
+        {
+            terrain.ApplyHeightScale(LoginSceneClassicHeightScale);
+        }
         AlignObjectsToTerrain(objects, terrain);
 
         var materialLibrary = new MaterialStateLibrary(worldDirectory, new[] { objectDirectory });
@@ -323,13 +332,15 @@ public sealed class WorldLoader
         return objects;
     }
 
-    private static TerrainData LoadTerrain(string attributesPath, string mappingPath, string heightPath, bool forceExtendedHeight, float? heightScale, out int attributeMapId, out int mappingMapId)
+    private static TerrainData LoadTerrain(string attributesPath, string mappingPath, string heightPath, bool isExtendedHeight, float? heightScale, out int attributeMapId, out int mappingMapId)
     {
         var height = new float[TerrainSize * TerrainSize];
         var layer1 = new byte[TerrainSize * TerrainSize];
         var layer2 = new byte[TerrainSize * TerrainSize];
         var alpha = new float[TerrainSize * TerrainSize];
         var attributes = new ushort[TerrainSize * TerrainSize];
+        float appliedScale;
+        bool extended;
 
         // atributos
         {
@@ -391,7 +402,7 @@ public sealed class WorldLoader
                 throw new InvalidDataException($"Arquivo de altura muito pequeno: {heightPath}");
             }
             var payload = raw.AsSpan(4);
-            var extended = forceExtendedHeight || Path.GetFileName(heightPath).Equals("TerrainHeightNew.OZB", StringComparison.OrdinalIgnoreCase);
+            extended = isExtendedHeight || Path.GetFileName(heightPath).Equals("TerrainHeightNew.OZB", StringComparison.OrdinalIgnoreCase);
             if (!extended)
             {
                 var expected = 1080 + height.Length;
@@ -400,6 +411,7 @@ public sealed class WorldLoader
                     throw new InvalidDataException($"Arquivo de altura clássico truncado: {heightPath}");
                 }
                 var scale = heightScale ?? DefaultClassicHeightScale;
+                appliedScale = scale;
                 var heightBytes = payload.Slice(1080);
                 for (var i = 0; i < height.Length; i++)
                 {
@@ -414,6 +426,7 @@ public sealed class WorldLoader
                 {
                     throw new InvalidDataException($"Arquivo TerrainHeightNew.OZB truncado: {heightPath}");
                 }
+                appliedScale = 1.0f;
                 var pixel = payload.Slice(headerSize);
                 for (var i = 0; i < height.Length; i++)
                 {
@@ -421,13 +434,13 @@ public sealed class WorldLoader
                     var g = pixel[i * 3 + 1];
                     var r = pixel[i * 3 + 2];
                     var combined = (r << 16) | (g << 8) | b;
-                    var value = (combined / 10.0f) + MinHeightBias;
+                    var value = combined + MinHeightBias;
                     height[i] = value;
                 }
             }
         }
 
-        return new TerrainData(height, layer1, layer2, alpha, attributes);
+        return new TerrainData(height, layer1, layer2, alpha, attributes, extended, appliedScale);
     }
 
     private static Dictionary<int, string> LoadModelNames(string? enumPath)
@@ -542,26 +555,55 @@ public sealed class WorldLoader
             StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string ResolveHeightPath(string worldDirectory, bool preferExtended)
+    private static HeightResource ResolveHeightResource(string worldDirectory, bool forceExtended, int? mapId)
     {
-        var classic = Path.Combine(worldDirectory, "TerrainHeight.OZB");
-        var extended = Path.Combine(worldDirectory, "TerrainHeightNew.OZB");
+        var classicPath = Path.Combine(worldDirectory, "TerrainHeight.OZB");
+        var extendedPath = Path.Combine(worldDirectory, "TerrainHeightNew.OZB");
 
-        bool classicValid = File.Exists(classic) && new FileInfo(classic).Length >= 4 + 1080 + TerrainSize * TerrainSize;
-        bool extendedValid = File.Exists(extended) && new FileInfo(extended).Length >= 4 + 54 + TerrainSize * TerrainSize * 3;
+        var classicSize = GetFileSize(classicPath);
+        var extendedSize = GetFileSize(extendedPath);
 
-        if (preferExtended && extendedValid)
+        var classicValid = classicSize >= ClassicHeightMinSize;
+        var extendedValid = extendedSize >= ExtendedHeightMinSize;
+
+        var preferExtended = forceExtended || IsTerrainHeightExtendedMap(mapId);
+        if (!preferExtended && ShouldPreferExtendedHeight(classicSize, extendedValid))
         {
-            return extended;
+            preferExtended = true;
+        }
+
+        if (preferExtended)
+        {
+            if (extendedValid)
+            {
+                return new HeightResource(extendedPath, true);
+            }
+            if (classicValid)
+            {
+                return new HeightResource(classicPath, false);
+            }
+        }
+        else
+        {
+            if (classicValid)
+            {
+                return new HeightResource(classicPath, false);
+            }
+            if (extendedValid)
+            {
+                return new HeightResource(extendedPath, true);
+            }
+        }
+
+        if (extendedValid)
+        {
+            return new HeightResource(extendedPath, true);
         }
         if (classicValid)
         {
-            return classic;
+            return new HeightResource(classicPath, false);
         }
-        if (extendedValid)
-        {
-            return extended;
-        }
+
         throw new FileNotFoundException("Arquivos TerrainHeight.OZB ou TerrainHeightNew.OZB não encontrados ou inválidos.");
     }
 
@@ -694,17 +736,57 @@ public sealed class WorldLoader
             data[i] ^= BuxCode[i % BuxCode.Length];
         }
     }
+
+    private static bool IsTerrainHeightExtendedMap(int? mapId)
+    {
+        return mapId is 42 or 63 or 66;
+    }
+
+    private static bool ShouldPreferExtendedHeight(long classicSize, bool extendedValid)
+    {
+        return classicSize >= 0 && classicSize < ClassicHeightMinSize && extendedValid;
+    }
+
+    private static long GetFileSize(string path)
+    {
+        try
+        {
+            return new FileInfo(path).Length;
+        }
+        catch (IOException)
+        {
+            return -1;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return -1;
+        }
+    }
+
+    private readonly struct HeightResource
+    {
+        public HeightResource(string path, bool isExtended)
+        {
+            Path = path;
+            IsExtended = isExtended;
+        }
+
+        public string Path { get; }
+        public bool IsExtended { get; }
+    }
 }
 
 public sealed class TerrainData
 {
-    public TerrainData(float[] height, byte[] layer1, byte[] layer2, float[] alpha, ushort[] attributes)
+    public TerrainData(float[] height, byte[] layer1, byte[] layer2, float[] alpha, ushort[] attributes, bool usesExtendedHeight, float heightScale)
     {
         Height = height;
         Layer1 = layer1;
         Layer2 = layer2;
         Alpha = alpha;
         Attributes = attributes;
+        UsesExtendedHeight = usesExtendedHeight;
+        HeightScale = heightScale;
     }
 
     public float[] Height { get; }
@@ -712,6 +794,29 @@ public sealed class TerrainData
     public byte[] Layer2 { get; }
     public float[] Alpha { get; }
     public ushort[] Attributes { get; }
+    public bool UsesExtendedHeight { get; }
+    public float HeightScale { get; private set; }
+
+    public void ApplyHeightScale(float newScale)
+    {
+        if (Math.Abs(newScale - HeightScale) < float.Epsilon)
+        {
+            return;
+        }
+
+        if (HeightScale <= 0f)
+        {
+            HeightScale = newScale;
+            return;
+        }
+
+        var multiplier = newScale / HeightScale;
+        for (var i = 0; i < Height.Length; i++)
+        {
+            Height[i] *= multiplier;
+        }
+        HeightScale = newScale;
+    }
 }
 
 public sealed class ObjectInstance
