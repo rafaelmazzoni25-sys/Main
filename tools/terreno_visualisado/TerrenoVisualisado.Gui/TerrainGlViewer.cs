@@ -105,7 +105,8 @@ internal sealed class TerrainGlViewer : UserControl
         }
 
         _mesh = TerrainMeshBuilder.Build(world.Terrain);
-        _renderer.UpdateData(_mesh, world.Visual?.CompositeTexture);
+        var terrainTexture = world.Visual?.LitCompositeTexture ?? world.Visual?.CompositeTexture;
+        _renderer.UpdateData(_mesh, terrainTexture);
         _objectRenderer.UpdateWorld(world);
         ResetCamera();
 
