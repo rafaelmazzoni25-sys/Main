@@ -79,7 +79,7 @@ dotnet run --project tools\terreno_visualisado\TerrenoVisualisado.csproj -- \
 Opções principais:
 
 * `--world <pasta>`: diretório que contém `EncTerrain*.map/.att` e `TerrainHeight.OZB`.
-* `--objects <pasta>`: diretório `ObjectX` com o `EncTerrain*.obj` correspondente (opcional).
+* `--objects <pasta>`: diretório `ObjectX` com o `EncTerrain*.obj` correspondente (opcional; na ausência deste parâmetro, o visualizador procura os objetos dentro do próprio `WorldX`).
 * `--map <id>`: força o ID numérico usado nos arquivos `EncTerrain`.
 * `--enum <arquivo>`: caminho para o `_enum.h` para exibir o nome textual dos objetos.
 * `--height-scale <valor>`: fator aplicado ao `TerrainHeight.OZB` clássico.

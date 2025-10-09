@@ -433,12 +433,39 @@ public sealed class WorldLoader
             }
         }
 
+        if (TryResolveObjectsInDirectory(worldDirectory, mapId) is { } fromWorld)
+        {
+            return fromWorld;
+        }
+
         if (GuessObjectFolder(worldDirectory) is { } guessed)
         {
             return ResolveTerrainFile(guessed, mapId, ".obj");
         }
 
         throw new FileNotFoundException("Arquivo EncTerrain*.obj não encontrado. Utilize --objects para informar a pasta correta.");
+    }
+
+    private static string? TryResolveObjectsInDirectory(string directory, int? mapId)
+    {
+        try
+        {
+            return ResolveTerrainFile(directory, mapId, ".obj");
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+
+        return null;
     }
 
     private static string ResolveHeightPath(string worldDirectory, bool preferExtended)
