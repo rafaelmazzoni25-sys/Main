@@ -118,7 +118,10 @@ inspecionar o terreno de forma fiel. A partir desta aba também é possível
 instanciar os
 modelos BMD (malhas e animações), desenhando cada objeto com seus materiais,
 animações e estados corretos para aproximar ainda mais o comportamento do
-cliente original.
+cliente original. A iluminação direcional foi recalibrada com perfis por mapa,
+ajustando céu, luz ambiente, especularidade e emissivos para reproduzir o clima
+do jogo — inclusive com modo "voo"/primeira pessoa para caminhar pelo mapa
+como dentro do cliente.
 
 #### Controles da câmera 3D
 

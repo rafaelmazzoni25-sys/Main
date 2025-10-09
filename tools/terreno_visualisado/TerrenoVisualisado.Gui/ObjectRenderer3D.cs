@@ -22,7 +22,13 @@ internal sealed class ObjectRenderer3D : IDisposable
     private bool _dirty = true;
     private bool _hasAnimatedModels;
     private float _animationTime;
-    private Vector3 _lightDirection = new(-0.4f, -1.0f, -0.6f);
+    private Vector3 _lightDirection = LightingProfile.Default.Direction;
+    private Vector3 _lightColor = LightingProfile.Default.SunColor;
+    private Vector3 _ambientColor = LightingProfile.Default.AmbientColor;
+    private Vector3 _specularColor = LightingProfile.Default.SpecularColor;
+    private float _diffuseStrength = LightingProfile.Default.DiffuseStrength;
+    private float _specularStrength = LightingProfile.Default.SpecularStrength;
+    private float _emissiveStrength = LightingProfile.Default.EmissiveStrength;
     private Vector3 _fogColor = new(0.23f, 0.28f, 0.34f);
     private Vector2 _fogParams = new(0.00045f, 1.35f);
     private bool _fogEnabled = true;
@@ -35,6 +41,12 @@ internal sealed class ObjectRenderer3D : IDisposable
     private int _uniformProjection;
     private int _uniformBones;
     private int _uniformLightDirection;
+    private int _uniformLightColor;
+    private int _uniformAmbientColor;
+    private int _uniformSpecularColor;
+    private int _uniformDiffuseStrength;
+    private int _uniformSpecularStrength;
+    private int _uniformEmissiveStrength;
     private int _uniformAlphaCutoff;
     private int _uniformMaterialFlags;
     private int _uniformTexture;
@@ -51,9 +63,15 @@ internal sealed class ObjectRenderer3D : IDisposable
         _dirty = true;
     }
 
-    public void ConfigureEnvironment(Vector3 lightDirection, Vector3 fogColor, Vector2 fogParams, bool fogEnabled, bool lightingEnabled)
+    public void ConfigureEnvironment(LightingProfile lighting, Vector3 fogColor, Vector2 fogParams, bool fogEnabled, bool lightingEnabled)
     {
-        _lightDirection = lightDirection;
+        _lightDirection = lighting.Direction;
+        _lightColor = lighting.SunColor;
+        _ambientColor = lighting.AmbientColor;
+        _specularColor = lighting.SpecularColor;
+        _diffuseStrength = lighting.DiffuseStrength;
+        _specularStrength = lighting.SpecularStrength;
+        _emissiveStrength = lighting.EmissiveStrength;
         _fogColor = fogColor;
         _fogParams = fogParams;
         _fogEnabled = fogEnabled;
@@ -115,6 +133,12 @@ internal sealed class ObjectRenderer3D : IDisposable
         GL.UniformMatrix4(_uniformView, false, ref view);
         GL.UniformMatrix4(_uniformProjection, false, ref projection);
         GL.Uniform3(_uniformLightDirection, _lightDirection);
+        GL.Uniform3(_uniformLightColor, _lightColor);
+        GL.Uniform3(_uniformAmbientColor, _ambientColor);
+        GL.Uniform3(_uniformSpecularColor, _specularColor);
+        GL.Uniform1(_uniformDiffuseStrength, _diffuseStrength);
+        GL.Uniform1(_uniformSpecularStrength, _specularStrength);
+        GL.Uniform1(_uniformEmissiveStrength, _emissiveStrength);
         GL.Uniform3(_uniformCameraPosition, cameraPosition);
         GL.Uniform3(_uniformFogColor, _fogColor);
         GL.Uniform2(_uniformFogParams, _fogParams);
@@ -222,6 +246,12 @@ internal sealed class ObjectRenderer3D : IDisposable
         _uniformProjection = GL.GetUniformLocation(_program, "uProjection");
         _uniformBones = GL.GetUniformLocation(_program, "uBones");
         _uniformLightDirection = GL.GetUniformLocation(_program, "uLightDirection");
+        _uniformLightColor = GL.GetUniformLocation(_program, "uLightColor");
+        _uniformAmbientColor = GL.GetUniformLocation(_program, "uAmbientColor");
+        _uniformSpecularColor = GL.GetUniformLocation(_program, "uSpecularColor");
+        _uniformDiffuseStrength = GL.GetUniformLocation(_program, "uDiffuseStrength");
+        _uniformSpecularStrength = GL.GetUniformLocation(_program, "uSpecularStrength");
+        _uniformEmissiveStrength = GL.GetUniformLocation(_program, "uEmissiveStrength");
         _uniformAlphaCutoff = GL.GetUniformLocation(_program, "uAlphaCutoff");
         _uniformMaterialFlags = GL.GetUniformLocation(_program, "uMaterialFlags");
         _uniformTexture = GL.GetUniformLocation(_program, "uTexture");
@@ -616,6 +646,12 @@ in vec3 vWorldPos;
 
 uniform sampler2D uTexture;
 uniform vec3 uLightDirection;
+uniform vec3 uLightColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uSpecularColor;
+uniform float uDiffuseStrength;
+uniform float uSpecularStrength;
+uniform float uEmissiveStrength;
 uniform float uAlphaCutoff;
 uniform int uMaterialFlags;
 uniform vec3 uCameraPosition;
@@ -654,13 +690,16 @@ void main()
         vec3 halfDir = normalize(lightDir + viewDir);
 
         float diffuse = max(dot(normal, lightDir), 0.0);
-        float ambient = 0.35;
-        float emissiveBoost = ((uMaterialFlags & 16) != 0) ? 0.35 : 0.0;
-        float specularWeight = ((uMaterialFlags & 3) != 0) ? 0.45 : 0.20;
         float shininess = ((uMaterialFlags & 1) != 0) ? 48.0 : 24.0;
-        float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specularWeight;
+        float specMultiplier = ((uMaterialFlags & 3) != 0) ? 1.0 : 0.6;
+        float emissiveBoost = ((uMaterialFlags & 16) != 0) ? uEmissiveStrength : 0.0;
 
-        lighting = color.rgb * (ambient + diffuse * 0.65) + emissiveBoost * color.rgb + specular;
+        vec3 ambient = color.rgb * uAmbientColor;
+        vec3 directional = color.rgb * uLightColor * (diffuse * uDiffuseStrength);
+        float specTerm = pow(max(dot(normal, halfDir), 0.0), shininess);
+        vec3 specular = uSpecularColor * specTerm * uSpecularStrength * specMultiplier;
+        lighting = ambient + directional + specular + emissiveBoost * color.rgb;
+        lighting = clamp(lighting, 0.0, 1.0);
     }
 
     float fogFactor = 1.0;
