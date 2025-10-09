@@ -15,11 +15,12 @@ internal sealed class SkyRenderer : IDisposable
 
     public Vector3 BottomColor => _bottomColor;
 
-    public void Configure(Vector3 fogColor)
+    public void Configure(Vector3 fogColor, LightingProfile lighting)
     {
-        var clamped = Vector3.Clamp(fogColor, Vector3.Zero, Vector3.One);
-        _bottomColor = Vector3.Clamp(clamped * 0.9f + new Vector3(0.03f, 0.03f, 0.04f), Vector3.Zero, Vector3.One);
-        _topColor = Vector3.Clamp(_bottomColor + new Vector3(0.18f, 0.18f, 0.22f), Vector3.Zero, Vector3.One);
+        var clampedFog = Vector3.Clamp(fogColor, Vector3.Zero, Vector3.One);
+        var sunTint = Vector3.Clamp(lighting.SunColor, Vector3.Zero, new Vector3(1.25f));
+        _bottomColor = Vector3.Clamp(clampedFog * 0.9f + sunTint * 0.12f + new Vector3(0.03f, 0.03f, 0.04f), Vector3.Zero, new Vector3(1.0f));
+        _topColor = Vector3.Clamp(_bottomColor + sunTint * 0.35f + new Vector3(0.06f, 0.07f, 0.09f), Vector3.Zero, new Vector3(1.0f));
     }
 
     public void EnsureResources()

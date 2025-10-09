@@ -13,7 +13,7 @@ namespace TerrenoVisualisado.Gui;
 
 internal sealed class TerrainGlViewer : UserControl
 {
-    private static readonly Vector3 DefaultLightDirection = new(0.5f, -0.5f, 0.5f);
+    private static readonly Vector3 DefaultLightDirection = LightingProfile.Default.Direction;
     private static readonly Vector3 DefaultFogColor = new(0.23f, 0.28f, 0.34f);
     private static readonly Vector2 DefaultFogParams = new(0.00045f, 1.35f);
 
@@ -40,6 +40,7 @@ internal sealed class TerrainGlViewer : UserControl
     private bool _lightingEnabled = true;
     private bool _animationsEnabled = true;
     private TerrainMesh? _mesh;
+    private LightingProfile _lightingProfile = LightingProfile.Default;
     private bool _contextReady;
     private bool _rotating;
     private bool _panning;
@@ -148,7 +149,7 @@ internal sealed class TerrainGlViewer : UserControl
             "Modo jogo: marque a caixa ou pressione F. Use WASD para mover, E/Espaço para subir, Q para descer, " +
             "Shift acelera e Ctrl desacelera.");
 
-        _skyRenderer.Configure(DefaultFogColor);
+        _skyRenderer.Configure(DefaultFogColor, _lightingProfile);
 
         _glControl.Load += HandleLoad;
         _glControl.Resize += HandleResize;
@@ -190,10 +191,11 @@ internal sealed class TerrainGlViewer : UserControl
         if (world is null)
         {
             _mesh = null;
-            _renderer.UpdateData(null, null, null, DefaultLightDirection, DefaultFogColor, DefaultFogParams, _fogEnabled, _lightingEnabled);
+            _lightingProfile = LightingProfile.Default;
+            _renderer.UpdateData(null, null, null, _lightingProfile, DefaultFogColor, DefaultFogParams, _fogEnabled, _lightingEnabled);
             _objectRenderer.UpdateWorld(null);
-            _objectRenderer.ConfigureEnvironment(DefaultLightDirection, DefaultFogColor, DefaultFogParams, _fogEnabled, _lightingEnabled);
-            _skyRenderer.Configure(DefaultFogColor);
+            _objectRenderer.ConfigureEnvironment(_lightingProfile, DefaultFogColor, DefaultFogParams, _fogEnabled, _lightingEnabled);
+            _skyRenderer.Configure(DefaultFogColor, _lightingProfile);
             _flightMode = false;
             _rotating = false;
             _panning = false;
@@ -219,10 +221,11 @@ internal sealed class TerrainGlViewer : UserControl
         var lightMap = world.Visual?.LightMap;
         var fogColor = EstimateFogColor(terrainTexture ?? world.Visual?.CompositeTexture, context);
         var fogParams = EstimateFogParams(context);
-        _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection, fogColor, fogParams, _fogEnabled, _lightingEnabled);
+        _lightingProfile = LightingProfile.Create(lightDirection, fogColor, context);
+        _renderer.UpdateData(_mesh, terrainTexture, lightMap, _lightingProfile, fogColor, fogParams, _fogEnabled, _lightingEnabled);
         _objectRenderer.UpdateWorld(world);
-        _objectRenderer.ConfigureEnvironment(lightDirection, fogColor, fogParams, _fogEnabled, _lightingEnabled);
-        _skyRenderer.Configure(fogColor);
+        _objectRenderer.ConfigureEnvironment(_lightingProfile, fogColor, fogParams, _fogEnabled, _lightingEnabled);
+        _skyRenderer.Configure(fogColor, _lightingProfile);
         ResetCamera();
 
         if (_contextReady)
