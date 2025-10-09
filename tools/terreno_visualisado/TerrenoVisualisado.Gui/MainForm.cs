@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Windows.Forms;
@@ -9,7 +11,8 @@ namespace TerrenoVisualisado.Gui;
 
 public class MainForm : Form
 {
-    private readonly TextBox _worldPath;
+    private readonly TextBox _rootPath;
+    private readonly ComboBox _worldSelector;
     private readonly TextBox _objectPath;
     private readonly TextBox _enumPath;
     private readonly CheckBox _forceMapId;
@@ -29,6 +32,8 @@ public class MainForm : Form
 
     private readonly WorldLoader _loader = new();
     private WorldData? _world;
+    private readonly List<WorldEntry> _worldEntries = new();
+    private WorldEntry? _selectedWorld;
 
     public MainForm()
     {
@@ -48,7 +53,7 @@ public class MainForm : Form
         var controlPanel = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 14,
+            ColumnCount = 16,
             AutoSize = true,
         };
         controlPanel.ColumnStyles.Clear();
@@ -57,16 +62,21 @@ public class MainForm : Form
             controlPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         }
 
-        _worldPath = new TextBox { Width = 280, Anchor = AnchorStyles.Left | AnchorStyles.Right };
+        _rootPath = new TextBox { Width = 260, Anchor = AnchorStyles.Left | AnchorStyles.Right };
+        _worldSelector = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
+        _worldSelector.SelectedIndexChanged += (_, _) => OnWorldSelected();
         _objectPath = new TextBox { Width = 200, Anchor = AnchorStyles.Left | AnchorStyles.Right };
         _enumPath = new TextBox { Width = 200, Anchor = AnchorStyles.Left | AnchorStyles.Right };
 
-        var worldLabel = new Label { Text = "World:", Anchor = AnchorStyles.Left, AutoSize = true };
+        var rootLabel = new Label { Text = "Raiz:", Anchor = AnchorStyles.Left, AutoSize = true };
+        var worldLabel = new Label { Text = "Mapa:", Anchor = AnchorStyles.Left, AutoSize = true };
         var objectLabel = new Label { Text = "Objetos:", Anchor = AnchorStyles.Left, AutoSize = true };
         var enumLabel = new Label { Text = "Enum:", Anchor = AnchorStyles.Left, AutoSize = true };
 
-        var browseWorld = new Button { Text = "...", AutoSize = true };
-        browseWorld.Click += (_, _) => BrowseFolder(_worldPath);
+        var browseRoot = new Button { Text = "...", AutoSize = true };
+        browseRoot.Click += (_, _) => BrowseRoot();
+        var refreshWorlds = new Button { Text = "Atualizar", AutoSize = true };
+        refreshWorlds.Click += (_, _) => PopulateWorldsFromRoot();
         var browseObjects = new Button { Text = "...", AutoSize = true };
         browseObjects.Click += (_, _) => BrowseFolder(_objectPath);
         var browseEnum = new Button { Text = "...", AutoSize = true };
@@ -118,20 +128,28 @@ public class MainForm : Form
         _overlayObjects = new CheckBox { Text = "Sobrepor objetos", AutoSize = true, Checked = true };
         _overlayObjects.CheckedChanged += (_, _) => RenderPreview();
 
-        controlPanel.Controls.Add(worldLabel, 0, 0);
-        controlPanel.Controls.Add(_worldPath, 1, 0);
-        controlPanel.Controls.Add(browseWorld, 2, 0);
-        controlPanel.Controls.Add(objectLabel, 3, 0);
-        controlPanel.Controls.Add(_objectPath, 4, 0);
-        controlPanel.Controls.Add(browseObjects, 5, 0);
-        controlPanel.Controls.Add(enumLabel, 6, 0);
-        controlPanel.Controls.Add(_enumPath, 7, 0);
-        controlPanel.Controls.Add(browseEnum, 8, 0);
-        controlPanel.Controls.Add(_forceMapId, 9, 0);
-        controlPanel.Controls.Add(_mapIdNumeric, 10, 0);
-        controlPanel.Controls.Add(_customHeightScale, 11, 0);
-        controlPanel.Controls.Add(_heightScaleNumeric, 12, 0);
-        controlPanel.Controls.Add(_forceExtendedHeight, 13, 0);
+        controlPanel.Controls.Add(rootLabel, 0, 0);
+        controlPanel.Controls.Add(_rootPath, 1, 0);
+        controlPanel.SetColumnSpan(_rootPath, 3);
+        controlPanel.Controls.Add(browseRoot, 4, 0);
+        controlPanel.Controls.Add(refreshWorlds, 5, 0);
+        controlPanel.Controls.Add(worldLabel, 6, 0);
+        controlPanel.Controls.Add(_worldSelector, 7, 0);
+        controlPanel.SetColumnSpan(_worldSelector, 3);
+        controlPanel.Controls.Add(objectLabel, 10, 0);
+        controlPanel.Controls.Add(_objectPath, 11, 0);
+        controlPanel.SetColumnSpan(_objectPath, 2);
+        controlPanel.Controls.Add(browseObjects, 13, 0);
+
+        controlPanel.Controls.Add(enumLabel, 0, 1);
+        controlPanel.Controls.Add(_enumPath, 1, 1);
+        controlPanel.SetColumnSpan(_enumPath, 3);
+        controlPanel.Controls.Add(browseEnum, 4, 1);
+        controlPanel.Controls.Add(_forceMapId, 5, 1);
+        controlPanel.Controls.Add(_mapIdNumeric, 6, 1);
+        controlPanel.Controls.Add(_customHeightScale, 7, 1);
+        controlPanel.Controls.Add(_heightScaleNumeric, 8, 1);
+        controlPanel.Controls.Add(_forceExtendedHeight, 9, 1);
 
         var controlRow2 = new FlowLayoutPanel
         {
@@ -225,6 +243,16 @@ public class MainForm : Form
         }
     }
 
+    private void BrowseRoot()
+    {
+        using var dialog = new FolderBrowserDialog();
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _rootPath.Text = dialog.SelectedPath;
+            PopulateWorldsFromRoot();
+        }
+    }
+
     private void BrowseFile(TextBox target, string filter)
     {
         using var dialog = new OpenFileDialog { Filter = filter };
@@ -236,9 +264,9 @@ public class MainForm : Form
 
     private void LoadWorld()
     {
-        if (string.IsNullOrWhiteSpace(_worldPath.Text))
+        if (_selectedWorld is null)
         {
-            MessageBox.Show(this, "Informe o diretório do mundo.", "Terreno Visualisado", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "Selecione um mapa disponível.", "Terreno Visualisado", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -254,7 +282,7 @@ public class MainForm : Form
         try
         {
             Cursor = Cursors.WaitCursor;
-            _world = _loader.Load(_worldPath.Text, options);
+            _world = _loader.Load(_selectedWorld.Path, options);
             _exportButton.Enabled = true;
             UpdateSummary();
             RenderPreview();
@@ -381,8 +409,162 @@ public class MainForm : Form
         _preview2D.Image = TerrainPreviewRenderer.Render(_world, item.Mode, _overlayObjects.Checked);
     }
 
+    private void PopulateWorldsFromRoot()
+    {
+        _worldEntries.Clear();
+        _worldSelector.Items.Clear();
+        _selectedWorld = null;
+
+        var root = _rootPath.Text;
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var entry in EnumerateWorlds(root))
+            {
+                _worldEntries.Add(entry);
+                _worldSelector.Items.Add(entry);
+            }
+
+            if (_worldEntries.Count > 0)
+            {
+                _worldSelector.SelectedIndex = 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Erro ao listar mundos", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void OnWorldSelected()
+    {
+        if (_worldSelector.SelectedItem is not WorldEntry entry)
+        {
+            _selectedWorld = null;
+            return;
+        }
+
+        _selectedWorld = entry;
+
+        if (!_forceMapId.Checked && entry.MapId.HasValue)
+        {
+            var mapId = entry.MapId.Value;
+            mapId = Math.Clamp(mapId, (int)_mapIdNumeric.Minimum, (int)_mapIdNumeric.Maximum);
+            _mapIdNumeric.Value = mapId;
+        }
+
+        if (string.IsNullOrWhiteSpace(_objectPath.Text))
+        {
+            var guess = GuessObjectDirectory(entry.Path);
+            if (guess is not null)
+            {
+                _objectPath.Text = guess;
+            }
+        }
+    }
+
+    private static IEnumerable<WorldEntry> EnumerateWorlds(string root)
+    {
+        var directories = Enumerable.Empty<string>();
+        try
+        {
+            directories = Directory.EnumerateDirectories(root);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            yield break;
+        }
+        catch (IOException)
+        {
+            yield break;
+        }
+
+        foreach (var path in directories.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
+        {
+            var info = new DirectoryInfo(path);
+            if (!info.Name.StartsWith("World", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!HasTerrainFiles(info.FullName))
+            {
+                continue;
+            }
+
+            yield return new WorldEntry(info.Name, info.FullName, ExtractDigits(info.Name));
+        }
+    }
+
+    private static bool HasTerrainFiles(string directory)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(directory, "EncTerrain*.map", SearchOption.TopDirectoryOnly).Any();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    private static string? GuessObjectDirectory(string worldPath)
+    {
+        var info = new DirectoryInfo(worldPath);
+        var name = info.Name;
+        if (!name.StartsWith("World", StringComparison.OrdinalIgnoreCase) || name.Length <= 5)
+        {
+            return null;
+        }
+
+        var suffix = name[5..];
+        var parent = info.Parent?.FullName ?? info.FullName;
+        var candidate = Path.Combine(parent, "Object" + suffix);
+        if (Directory.Exists(candidate))
+        {
+            return candidate;
+        }
+
+        var lowerCandidate = Path.Combine(parent, "object" + suffix);
+        if (Directory.Exists(lowerCandidate))
+        {
+            return lowerCandidate;
+        }
+
+        return null;
+    }
+
+    private static int? ExtractDigits(string text)
+    {
+        var digits = new string(text.Where(char.IsDigit).ToArray());
+        if (digits.Length == 0)
+        {
+            return null;
+        }
+
+        return int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : null;
+    }
+
     private sealed record PreviewItem(string Text, PreviewMode Mode)
     {
         public override string ToString() => Text;
+    }
+
+    private sealed record WorldEntry(string Name, string Path, int? MapId)
+    {
+        public override string ToString()
+        {
+            return MapId.HasValue ? $"{Name} (Mapa {MapId.Value})" : Name;
+        }
     }
 }
