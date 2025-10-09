@@ -27,9 +27,13 @@ internal sealed class TerrainRenderer3D : IDisposable
     private Vector3 _lightDirection = new(0.5f, -0.5f, 0.5f);
     private Vector3 _fogColor = new(0.23f, 0.28f, 0.34f);
     private Vector2 _fogParams = new(0.00045f, 1.35f);
+    private bool _fogEnabled = true;
+    private bool _lightingEnabled = true;
     private int _uniformCameraPosition;
     private int _uniformFogColor;
     private int _uniformFogParams;
+    private int _uniformFogEnabled;
+    private int _uniformLightingEnabled;
     private int _uniformTime;
     private float _elapsedTime;
     private int _indexCount;
@@ -40,7 +44,9 @@ internal sealed class TerrainRenderer3D : IDisposable
         TextureImage? lightMap,
         Vector3 lightDirection,
         Vector3 fogColor,
-        Vector2 fogParams)
+        Vector2 fogParams,
+        bool fogEnabled,
+        bool lightingEnabled)
     {
         _mesh = mesh;
         _texture = texture;
@@ -48,8 +54,20 @@ internal sealed class TerrainRenderer3D : IDisposable
         _lightDirection = lightDirection;
         _fogColor = fogColor;
         _fogParams = fogParams;
+        _fogEnabled = fogEnabled;
+        _lightingEnabled = lightingEnabled;
         _elapsedTime = 0f;
         _dirty = true;
+    }
+
+    public void SetFogEnabled(bool enabled)
+    {
+        _fogEnabled = enabled;
+    }
+
+    public void SetLightingEnabled(bool enabled)
+    {
+        _lightingEnabled = enabled;
     }
 
     public void AdvanceTime(float deltaTime)
@@ -92,6 +110,8 @@ internal sealed class TerrainRenderer3D : IDisposable
         _uniformFogColor = GL.GetUniformLocation(_program, "uFogColor");
         _uniformFogParams = GL.GetUniformLocation(_program, "uFogParams");
         _uniformTime = GL.GetUniformLocation(_program, "uTime");
+        _uniformFogEnabled = GL.GetUniformLocation(_program, "uFogEnabled");
+        _uniformLightingEnabled = GL.GetUniformLocation(_program, "uLightingEnabled");
 
         _vao = GL.GenVertexArray();
         _vbo = GL.GenBuffer();
@@ -171,6 +191,14 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.Uniform3(_uniformFogColor, _fogColor);
         GL.Uniform2(_uniformFogParams, _fogParams);
         GL.Uniform1(_uniformTime, _elapsedTime);
+        if (_uniformFogEnabled >= 0)
+        {
+            GL.Uniform1(_uniformFogEnabled, _fogEnabled ? 1 : 0);
+        }
+        if (_uniformLightingEnabled >= 0)
+        {
+            GL.Uniform1(_uniformLightingEnabled, _lightingEnabled ? 1 : 0);
+        }
 
         GL.ActiveTexture(TextureUnit.Texture0);
         GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
@@ -263,16 +291,13 @@ uniform vec3 uCameraPosition;
 uniform vec3 uFogColor;
 uniform vec2 uFogParams;
 uniform float uTime;
+uniform int uFogEnabled;
+uniform int uLightingEnabled;
 
 out vec4 FragColor;
 
 void main()
 {
-    vec3 normal = normalize(vNormal);
-    vec3 lightDir = normalize(-uLightDirection);
-    vec3 viewDir = normalize(uCameraPosition - vWorldPos);
-    vec3 halfDir = normalize(lightDir + viewDir);
-
     vec2 animatedUv = vTexCoord;
     if ((vMaterialFlags & 1) != 0)
     {
@@ -285,21 +310,33 @@ void main()
 
     vec4 baseColor = texture(uTexture, animatedUv);
     vec3 lightColor = texture(uLightMap, animatedUv).rgb;
+    vec3 lit = baseColor.rgb * lightColor;
+    if (uLightingEnabled != 0)
+    {
+        vec3 normal = normalize(vNormal);
+        vec3 lightDir = normalize(-uLightDirection);
+        vec3 viewDir = normalize(uCameraPosition - vWorldPos);
+        vec3 halfDir = normalize(lightDir + viewDir);
 
-    float diffuse = max(dot(normal, lightDir), 0.0);
-    float ambient = 0.35;
-    float emissive = ((vMaterialFlags & 16) != 0) ? 0.30 : 0.0;
-    float specStrength = ((vMaterialFlags & 3) != 0) ? 0.55 : 0.20;
-    float shininess = ((vMaterialFlags & 1) != 0) ? 48.0 : 24.0;
-    float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specStrength;
+        float diffuse = max(dot(normal, lightDir), 0.0);
+        float ambient = 0.35;
+        float emissive = ((vMaterialFlags & 16) != 0) ? 0.30 : 0.0;
+        float specStrength = ((vMaterialFlags & 3) != 0) ? 0.55 : 0.20;
+        float shininess = ((vMaterialFlags & 1) != 0) ? 48.0 : 24.0;
+        float specular = pow(max(dot(normal, halfDir), 0.0), shininess) * specStrength;
 
-    vec3 lit = baseColor.rgb * (ambient + diffuse * 0.75) * lightColor;
-    lit += specular * lightColor;
-    lit += emissive * baseColor.rgb;
+        lit = baseColor.rgb * (ambient + diffuse * 0.75) * lightColor;
+        lit += specular * lightColor;
+        lit += emissive * baseColor.rgb;
+    }
 
-    float distanceToCamera = length(uCameraPosition - vWorldPos);
-    float fogFactor = exp(-pow(distanceToCamera * uFogParams.x, uFogParams.y));
-    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    float fogFactor = 1.0;
+    if (uFogEnabled != 0)
+    {
+        float distanceToCamera = length(uCameraPosition - vWorldPos);
+        fogFactor = exp(-pow(distanceToCamera * uFogParams.x, uFogParams.y));
+        fogFactor = clamp(fogFactor, 0.0, 1.0);
+    }
     vec3 finalColor = mix(uFogColor, lit, fogFactor);
 
     FragColor = vec4(finalColor, baseColor.a);
