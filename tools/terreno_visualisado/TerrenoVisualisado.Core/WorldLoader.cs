@@ -495,21 +495,52 @@ public sealed class WorldLoader
 
     private static List<string> EnumerateTerrainFiles(string directory, string extension)
     {
-        var pattern = "EncTerrain*" + extension;
-        var matches = Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
+        var basePattern = "EncTerrain*" + extension;
+        var matches = EnumerateTerrainFiles(directory, basePattern, SearchOption.TopDirectoryOnly);
         if (matches.Count > 0)
         {
             return matches;
         }
 
-        matches = Directory.EnumerateFiles(directory, pattern, SearchOption.AllDirectories)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        matches = EnumerateTerrainFiles(directory, basePattern, SearchOption.AllDirectories);
+        if (matches.Count > 0)
+        {
+            return matches;
+        }
+
+        // Alguns pacotes personalizados renomeiam os arquivos de terreno com prefixos adicionais,
+        // mantendo apenas "EncTerrain" no meio do nome. Para alinhar com o comportamento do
+        // cliente original (que faz chamadas diretas ao nome base), use um curinga mais amplo
+        // antes de desistir.
+        matches = EnumerateTerrainFiles(directory, "*EncTerrain*" + extension, SearchOption.AllDirectories);
 
         return matches;
+    }
+
+    private static List<string> EnumerateTerrainFiles(string directory, string pattern, SearchOption option)
+    {
+        try
+        {
+            var enumerationOptions = new EnumerationOptions
+            {
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = option == SearchOption.AllDirectories,
+#if NET6_0_OR_GREATER
+                MatchCasing = MatchCasing.CaseInsensitive,
+#endif
+            };
+            return Directory.EnumerateFiles(directory, pattern, enumerationOptions)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new List<string>();
+        }
+        catch (IOException)
+        {
+            return new List<string>();
+        }
     }
 
     private static string? GuessObjectFolder(string worldDirectory)
