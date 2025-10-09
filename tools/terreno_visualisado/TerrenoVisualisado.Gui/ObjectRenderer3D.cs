@@ -353,30 +353,19 @@ internal sealed class ObjectRenderer3D : IDisposable
         }
 
         var actionIndex = 0;
-        if (model.Actions.Count == 0 || model.Actions[actionIndex].KeyframeCount == 0)
-        {
-            for (var i = 0; i < Math.Min(bones.Count, MaxBones); i++)
-            {
-                if (bones[i].Parent >= 0 && bones[i].Parent < MaxBones)
-                {
-                    _bonePalette[i] = _bonePalette[bones[i].Parent];
-                }
-            }
-            return;
-        }
-
-        var action = model.Actions[actionIndex];
-        var keyframes = Math.Max(1, (int)action.KeyframeCount);
+        var hasAction = model.Actions.Count > actionIndex && model.Actions[actionIndex].KeyframeCount > 0;
+        var action = hasAction ? model.Actions[actionIndex] : null;
+        var keyframes = hasAction ? Math.Max(1, (int)action!.KeyframeCount) : 1;
         var frameTime = _animationTime * AnimationFps;
-        var wrapped = frameTime % keyframes;
-        var currentFrame = (int)MathF.Floor(wrapped);
-        var nextFrame = (currentFrame + 1) % keyframes;
-        var t = wrapped - currentFrame;
+        var wrapped = keyframes > 0 ? frameTime % keyframes : 0f;
+        var currentFrame = hasAction ? (int)MathF.Floor(wrapped) : 0;
+        var nextFrame = hasAction ? (currentFrame + 1) % keyframes : 0;
+        var t = hasAction ? wrapped - currentFrame : 0f;
 
         for (var boneIndex = 0; boneIndex < Math.Min(bones.Count, MaxBones); boneIndex++)
         {
             var bone = bones[boneIndex];
-            if (bone.IsDummy || bone.Animations.Count <= actionIndex)
+            if (bone.IsDummy)
             {
                 _bonePalette[boneIndex] = bone.Parent >= 0 && bone.Parent < MaxBones
                     ? _bonePalette[bone.Parent]
@@ -384,13 +373,27 @@ internal sealed class ObjectRenderer3D : IDisposable
                 continue;
             }
 
-            var animation = bone.Animations[actionIndex];
-            var position = InterpolatePosition(animation.Positions, currentFrame, nextFrame, t);
-            var rotation = Interpolate(animation.Quaternions, currentFrame, nextFrame, t);
+            var local = Matrix4.Identity;
+            if (!IsIdentity(bone.RestQuaternion))
+            {
+                local *= Matrix4.CreateFromQuaternion(ToQuaternion(bone.RestQuaternion));
+            }
+            if (!IsZero(bone.RestTranslation))
+            {
+                var rest = ToVector3(bone.RestTranslation);
+                local *= Matrix4.CreateTranslation(rest.X, rest.Y, rest.Z);
+            }
 
-            var local = Matrix4.CreateFromQuaternion(ToQuaternion(rotation));
-            var translated = ToVector3(position);
-            local *= Matrix4.CreateTranslation(translated.X, translated.Y, translated.Z);
+            if (hasAction && bone.Animations.Count > actionIndex)
+            {
+                var animation = bone.Animations[actionIndex];
+                var position = InterpolatePosition(animation.Positions, currentFrame, nextFrame, t);
+                var rotation = Interpolate(animation.Quaternions, currentFrame, nextFrame, t);
+
+                local *= Matrix4.CreateFromQuaternion(ToQuaternion(rotation));
+                var translated = ToVector3(position);
+                local *= Matrix4.CreateTranslation(translated.X, translated.Y, translated.Z);
+            }
 
             if (bone.Parent >= 0 && bone.Parent < MaxBones)
             {
@@ -400,12 +403,27 @@ internal sealed class ObjectRenderer3D : IDisposable
             _bonePalette[boneIndex] = local;
         }
 
-        if (action.LockPositions && action.LockedPositions.Count > 0)
+        if (hasAction && action!.LockPositions && action.LockedPositions.Count > 0)
         {
             var rootOffset = InterpolatePosition(action.LockedPositions, currentFrame, nextFrame, t);
             var offset = ToVector3(rootOffset);
             _bonePalette[0] *= Matrix4.CreateTranslation(offset.X, offset.Y, offset.Z);
         }
+    }
+
+    private static bool IsZero(System.Numerics.Vector3 value)
+    {
+        return Math.Abs(value.X) < float.Epsilon
+            && Math.Abs(value.Y) < float.Epsilon
+            && Math.Abs(value.Z) < float.Epsilon;
+    }
+
+    private static bool IsIdentity(System.Numerics.Quaternion value)
+    {
+        return Math.Abs(value.X) < float.Epsilon
+            && Math.Abs(value.Y) < float.Epsilon
+            && Math.Abs(value.Z) < float.Epsilon
+            && Math.Abs(value.W - 1f) < float.Epsilon;
     }
 
     private static System.Numerics.Vector3 InterpolatePosition(IReadOnlyList<System.Numerics.Vector3> values, int current, int next, float t)

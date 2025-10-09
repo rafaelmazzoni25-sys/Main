@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Linq;
 using System.Numerics;
 using System.Text;
 
@@ -36,6 +37,9 @@ public sealed class BmdBone
     public string Name { get; init; } = string.Empty;
     public short Parent { get; init; }
     public bool IsDummy { get; init; }
+    public Vector3 RestTranslation { get; init; }
+    public Vector3 RestRotation { get; init; }
+    public Quaternion RestQuaternion { get; init; }
     public IReadOnlyList<BmdBoneAnimation> Animations { get; init; } = Array.Empty<BmdBoneAnimation>();
 }
 
@@ -360,6 +364,8 @@ internal static class BmdLoader
         }
 
         var bones = new List<BmdBone>(numBones);
+        var channelStride = actions.Sum(action => (int)action.KeyframeCount) * 24;
+
         for (var boneIndex = 0; boneIndex < numBones; boneIndex++)
         {
             EnsureAvailable(data, ptr, 1, "Dados de osso truncados");
@@ -378,6 +384,30 @@ internal static class BmdLoader
             EnsureAvailable(data, ptr, 2, "Dados de osso truncados");
             var parent = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(ptr));
             ptr += 2;
+
+            var restTranslation = Vector3.Zero;
+            var restRotation = Vector3.Zero;
+            var restQuaternion = Quaternion.Identity;
+
+            var remainingBones = numBones - boneIndex;
+            var bytesRemaining = data.Length - ptr;
+            var includeRest = channelStride > 0
+                ? bytesRemaining >= remainingBones * (channelStride + 24)
+                : bytesRemaining >= remainingBones * 24;
+
+            if (includeRest && ptr + 24 <= data.Length)
+            {
+                var tx = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(ptr)); ptr += 4;
+                var ty = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(ptr)); ptr += 4;
+                var tz = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(ptr)); ptr += 4;
+                restTranslation = new Vector3(tx, ty, tz);
+
+                var rx = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(ptr)); ptr += 4;
+                var ry = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(ptr)); ptr += 4;
+                var rz = BinaryPrimitives.ReadSingleLittleEndian(data.AsSpan(ptr)); ptr += 4;
+                restRotation = new Vector3(rx, ry, rz);
+                restQuaternion = EulerToQuaternion(restRotation);
+            }
 
             var boneAnimations = new List<BmdBoneAnimation>(actions.Count);
             foreach (var action in actions)
@@ -420,6 +450,9 @@ internal static class BmdLoader
                 Name = boneName,
                 Parent = parent,
                 IsDummy = false,
+                RestTranslation = restTranslation,
+                RestRotation = restRotation,
+                RestQuaternion = restQuaternion,
                 Animations = boneAnimations,
             });
         }
