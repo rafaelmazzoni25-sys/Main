@@ -42,6 +42,9 @@ internal sealed class TerrainGlViewer : UserControl
     private TerrainMesh? _mesh;
     private LightingProfile _lightingProfile = LightingProfile.Default;
     private bool _contextReady;
+    private bool _renderingUnavailable;
+    private string? _renderingError;
+    private bool _renderingErrorShown;
     private bool _rotating;
     private bool _panning;
     private Point _lastMouse;
@@ -60,7 +63,7 @@ internal sealed class TerrainGlViewer : UserControl
         _glControl = new GLControl(new GLControlSettings
         {
             API = ContextAPI.OpenGL,
-            APIVersion = new Version(4, 1),
+            APIVersion = new Version(3, 3),
             Profile = ContextProfile.Core,
             Flags = ContextFlags.Default,
         })
@@ -177,9 +180,41 @@ internal sealed class TerrainGlViewer : UserControl
         {
             _inputTimer.Stop();
             _inputTimer.Dispose();
-            _renderer.Dispose();
-            _objectRenderer.Dispose();
-            _skyRenderer.Dispose();
+            try
+            {
+                if (_contextReady && !_renderingUnavailable)
+                {
+                    _glControl.MakeCurrent();
+                }
+            }
+            catch
+            {
+                // Ignore errors when restoring the OpenGL context during disposal.
+            }
+
+            try
+            {
+                _renderer.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _objectRenderer.Dispose();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _skyRenderer.Dispose();
+            }
+            catch
+            {
+            }
             _toolTip.Dispose();
             _glControl.Dispose();
         }
@@ -188,6 +223,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     public void DisplayWorld(WorldData? world)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         if (world is null)
         {
             _mesh = null;
@@ -203,10 +243,17 @@ internal sealed class TerrainGlViewer : UserControl
             ApplyRenderingSettings();
             if (_contextReady)
             {
-                _glControl.MakeCurrent();
-                _renderer.EnsureResources();
-                _objectRenderer.EnsureResources();
-                _glControl.Invalidate();
+                try
+                {
+                    _glControl.MakeCurrent();
+                    _renderer.EnsureResources();
+                    _objectRenderer.EnsureResources();
+                    _glControl.Invalidate();
+                }
+                catch (Exception ex)
+                {
+                    HandleRenderingFailure("inicializar recursos 3D", ex);
+                }
             }
             return;
         }
@@ -230,10 +277,17 @@ internal sealed class TerrainGlViewer : UserControl
 
         if (_contextReady)
         {
-            _glControl.MakeCurrent();
-            _renderer.EnsureResources();
-            _objectRenderer.EnsureResources();
-            _glControl.Invalidate();
+            try
+            {
+                _glControl.MakeCurrent();
+                _renderer.EnsureResources();
+                _objectRenderer.EnsureResources();
+                _glControl.Invalidate();
+            }
+            catch (Exception ex)
+            {
+                HandleRenderingFailure("atualizar recursos 3D", ex);
+            }
         }
 
         ApplyRenderingSettings();
@@ -263,74 +317,117 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleLoad(object? sender, EventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         _contextReady = true;
-        _glControl.MakeCurrent();
-        GL.ClearColor(0.1f, 0.14f, 0.2f, 1f);
-        GL.Enable(EnableCap.DepthTest);
-        _renderer.EnsureResources();
-        _objectRenderer.EnsureResources();
+        try
+        {
+            _glControl.MakeCurrent();
+            GL.ClearColor(0.1f, 0.14f, 0.2f, 1f);
+            GL.Enable(EnableCap.DepthTest);
+            _renderer.EnsureResources();
+            _objectRenderer.EnsureResources();
+        }
+        catch (Exception ex)
+        {
+            HandleRenderingFailure("inicializar a visualização 3D", ex);
+        }
     }
 
     private void HandleResize(object? sender, EventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         if (!_contextReady)
         {
             return;
         }
 
-        _glControl.MakeCurrent();
-        GL.Viewport(0, 0, Math.Max(1, _glControl.Width), Math.Max(1, _glControl.Height));
-        _glControl.Invalidate();
+        try
+        {
+            _glControl.MakeCurrent();
+            GL.Viewport(0, 0, Math.Max(1, _glControl.Width), Math.Max(1, _glControl.Height));
+            _glControl.Invalidate();
+        }
+        catch (Exception ex)
+        {
+            HandleRenderingFailure("ajustar o viewport 3D", ex);
+        }
     }
 
     private void HandlePaint(object? sender, PaintEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            DrawFallbackMessage(e.Graphics);
+            return;
+        }
+
         if (!_contextReady)
         {
             e.Graphics.Clear(Color.Black);
             return;
         }
 
-        _glControl.MakeCurrent();
-        var clearColor = _skyEnabled ? _skyRenderer.BottomColor : new Vector3(0.05f, 0.07f, 0.11f);
-        GL.ClearColor(clearColor.X, clearColor.Y, clearColor.Z, 1f);
-        GL.Viewport(0, 0, Math.Max(1, _glControl.Width), Math.Max(1, _glControl.Height));
-        GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
-
-        if (_skyEnabled)
+        try
         {
-            _skyRenderer.EnsureResources();
-            _skyRenderer.Render();
-        }
+            _glControl.MakeCurrent();
+            var clearColor = _skyEnabled ? _skyRenderer.BottomColor : new Vector3(0.05f, 0.07f, 0.11f);
+            GL.ClearColor(clearColor.X, clearColor.Y, clearColor.Z, 1f);
+            GL.Viewport(0, 0, Math.Max(1, _glControl.Width), Math.Max(1, _glControl.Height));
+            GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit);
 
-        if (_mesh is null)
-        {
+            if (_skyEnabled)
+            {
+                _skyRenderer.EnsureResources();
+                _skyRenderer.Render();
+            }
+
+            if (_mesh is null)
+            {
+                _glControl.SwapBuffers();
+                return;
+            }
+
+            var aspect = _glControl.Width / (float)Math.Max(1, _glControl.Height);
+            var view = _flightMode ? GetFlightViewMatrix() : _camera.ViewMatrix;
+            var projection = _camera.ProjectionMatrix(aspect);
+            var cameraPosition = _flightMode ? _flightPosition : _camera.Position;
+
+            if (_showTerrain)
+            {
+                _renderer.EnsureResources();
+                _renderer.Render(view, projection, cameraPosition);
+            }
+
+            if (_showObjects)
+            {
+                _objectRenderer.EnsureResources();
+                _objectRenderer.Render(view, projection, cameraPosition);
+            }
+
             _glControl.SwapBuffers();
-            return;
         }
-
-        var aspect = _glControl.Width / (float)Math.Max(1, _glControl.Height);
-        var view = _flightMode ? GetFlightViewMatrix() : _camera.ViewMatrix;
-        var projection = _camera.ProjectionMatrix(aspect);
-        var cameraPosition = _flightMode ? _flightPosition : _camera.Position;
-
-        if (_showTerrain)
+        catch (Exception ex)
         {
-            _renderer.EnsureResources();
-            _renderer.Render(view, projection, cameraPosition);
+            HandleRenderingFailure("renderizar a cena 3D", ex);
+            DrawFallbackMessage(e.Graphics);
         }
-
-        if (_showObjects)
-        {
-            _objectRenderer.EnsureResources();
-            _objectRenderer.Render(view, projection, cameraPosition);
-        }
-
-        _glControl.SwapBuffers();
     }
 
     private void HandleMouseDown(object? sender, MouseEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         _glControl.Focus();
         if (e.Button == MouseButtons.Left)
         {
@@ -345,6 +442,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleMouseUp(object? sender, MouseEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         if (e.Button == MouseButtons.Left)
         {
             _rotating = false;
@@ -357,6 +459,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleMouseMove(object? sender, MouseEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         if (!_rotating && !_panning)
         {
             return;
@@ -392,6 +499,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleMouseWheel(object? sender, MouseEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         var factor = 1f - Math.Sign(e.Delta) * 0.1f;
         if (_flightMode)
         {
@@ -406,6 +518,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleKeyDown(object? sender, KeyEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         _keys.Add(e.KeyCode);
         if (e.KeyCode == Keys.F)
         {
@@ -426,11 +543,21 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleKeyUp(object? sender, KeyEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         _keys.Remove(e.KeyCode);
     }
 
     private void HandleLostFocus(object? sender, EventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         _keys.Clear();
         _rotating = false;
         _panning = false;
@@ -438,6 +565,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandlePreviewKeyDown(object? sender, PreviewKeyDownEventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Tab)
         {
             e.IsInputKey = true;
@@ -446,6 +578,12 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void HandleTick(object? sender, EventArgs e)
     {
+        if (_renderingUnavailable)
+        {
+            _deltaWatch.Restart();
+            return;
+        }
+
         var deltaTime = (float)_deltaWatch.Elapsed.TotalSeconds;
         _deltaWatch.Restart();
 
@@ -665,6 +803,11 @@ internal sealed class TerrainGlViewer : UserControl
 
     private void ApplyRenderingSettings()
     {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
         _renderer.SetFogEnabled(_fogEnabled);
         _renderer.SetLightingEnabled(_lightingEnabled);
         _objectRenderer.SetFogEnabled(_fogEnabled);
@@ -782,5 +925,47 @@ internal sealed class TerrainGlViewer : UserControl
             MathHelper.Clamp(color.X, min, max),
             MathHelper.Clamp(color.Y, min, max),
             MathHelper.Clamp(color.Z, min, max));
+    }
+
+    private void HandleRenderingFailure(string stage, Exception ex)
+    {
+        if (_renderingUnavailable)
+        {
+            return;
+        }
+
+        _renderingUnavailable = true;
+        _contextReady = false;
+        _renderingError = $"Não foi possível {stage}: {ex.Message}";
+        _inputTimer.Stop();
+
+        if (!_renderingErrorShown)
+        {
+            _renderingErrorShown = true;
+            var owner = FindForm();
+            var message = _renderingError + Environment.NewLine + Environment.NewLine +
+                          "A visualização 3D foi desativada para evitar o fechamento do programa.";
+            MessageBox.Show(owner, message, "Visualização 3D indisponível", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        _glControl.Invalidate();
+    }
+
+    private void DrawFallbackMessage(Graphics graphics)
+    {
+        graphics.Clear(Color.Black);
+        if (string.IsNullOrWhiteSpace(_renderingError))
+        {
+            return;
+        }
+
+        using var brush = new SolidBrush(Color.White);
+        using var format = new StringFormat
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+        };
+        graphics.DrawString(_renderingError, Font ?? SystemFonts.DefaultFont, brush,
+            new RectangleF(0, 0, Width, Height), format);
     }
 }
