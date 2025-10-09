@@ -471,9 +471,7 @@ public sealed class WorldLoader
             throw new DirectoryNotFoundException($"Diretório inválido: {directory}");
         }
 
-        var matches = Directory.EnumerateFiles(directory, "EncTerrain*" + extension, SearchOption.TopDirectoryOnly)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var matches = EnumerateTerrainFiles(directory, extension);
 
         if (matches.Count == 0)
         {
@@ -493,6 +491,25 @@ public sealed class WorldLoader
         }
 
         return matches[0];
+    }
+
+    private static List<string> EnumerateTerrainFiles(string directory, string extension)
+    {
+        var pattern = "EncTerrain*" + extension;
+        var matches = Directory.EnumerateFiles(directory, pattern, SearchOption.TopDirectoryOnly)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (matches.Count > 0)
+        {
+            return matches;
+        }
+
+        matches = Directory.EnumerateFiles(directory, pattern, SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return matches;
     }
 
     private static string? GuessObjectFolder(string worldDirectory)
