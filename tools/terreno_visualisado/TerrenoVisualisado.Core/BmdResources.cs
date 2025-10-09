@@ -296,7 +296,7 @@ internal static class BmdLoader
                     var normal = Vector3.Normalize(Vector3.Cross(v1 - v0, v2 - v0));
                     if (!float.IsFinite(normal.X))
                     {
-                        normal = Vector3.UnitY;
+                        normal = Vector3.UnitZ;
                     }
                     foreach (var pt in pts)
                     {

@@ -6,7 +6,7 @@ namespace TerrenoVisualisado.Gui;
 
 internal readonly struct LightingProfile
 {
-    private static readonly Vector3 s_defaultDirection = Vector3.Normalize(new Vector3(0.5f, -0.5f, 0.5f));
+    private static readonly Vector3 s_defaultDirection = Vector3.Normalize(new Vector3(0.5f, 0.5f, -0.5f));
     private static readonly Vector3 s_defaultSunColor = new(1.05f, 0.98f, 0.92f);
     private static readonly Vector3 s_defaultAmbientColor = new(0.35f, 0.38f, 0.42f);
     private static readonly Vector3 s_defaultSpecularColor = new(0.90f, 0.90f, 0.88f);

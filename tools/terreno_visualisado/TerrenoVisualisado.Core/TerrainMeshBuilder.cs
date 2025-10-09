@@ -74,7 +74,7 @@ public static class TerrainMeshBuilder
                 var offset = vertexIndex * vertexStride;
                 var height = SampleHeight(terrain, x, y);
 
-                var position = new Vector3(x * WorldLoader.TerrainScale, height, y * WorldLoader.TerrainScale);
+                var position = new Vector3(x * WorldLoader.TerrainScale, y * WorldLoader.TerrainScale, height);
                 var normal = ComputeNormal(terrain, x, y);
                 var u = x / (float)(size - 1);
                 // Invert the V axis to match the top-down atlas orientation used by the
@@ -117,9 +117,9 @@ public static class TerrainMeshBuilder
             }
         }
 
-        var boundsMin = new Vector3(0f, minHeight, 0f);
+        var boundsMin = new Vector3(0f, 0f, minHeight);
         var extent = (size - 1) * WorldLoader.TerrainScale;
-        var boundsMax = new Vector3(extent, maxHeight, extent);
+        var boundsMax = new Vector3(extent, extent, maxHeight);
 
         return new TerrainMesh(vertices, indices, boundsMin, boundsMax, vertexStride);
     }
@@ -146,11 +146,11 @@ public static class TerrainMeshBuilder
 
         var scale = WorldLoader.TerrainScale;
         var dx = (hR - hL) / (2f * scale);
-        var dz = (hD - hU) / (2f * scale);
-        var normal = new Vector3(-dx, 1f, -dz);
+        var dy = (hD - hU) / (2f * scale);
+        var normal = new Vector3(-dx, -dy, 1f);
         if (normal.LengthSquared() <= float.Epsilon)
         {
-            return Vector3.UnitY;
+            return Vector3.UnitZ;
         }
         return Vector3.Normalize(normal);
     }
