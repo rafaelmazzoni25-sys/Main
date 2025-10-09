@@ -4,6 +4,8 @@ public sealed class TerrainVisualData
 {
     public TextureImage? CompositeTexture { get; init; }
     public TextureImage? LitCompositeTexture { get; init; }
+    public TextureImage? HighDetailCompositeTexture { get; init; }
+    public TextureImage? HighDetailLitCompositeTexture { get; init; }
     public TextureImage? LightMap { get; init; }
     public string? LightMapPath { get; init; }
     public IReadOnlyDictionary<byte, string?> TileTextures { get; init; } = new Dictionary<byte, string?>();

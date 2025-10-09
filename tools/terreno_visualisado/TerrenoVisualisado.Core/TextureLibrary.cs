@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 
 namespace TerrenoVisualisado.Core;
@@ -48,6 +49,8 @@ public sealed class TextureLibrary
         _searchRoots = BuildSearchRoots(worldDirectory, objectDirectory, context);
     }
 
+    public int DetailFactor => _detailFactor;
+
     public IReadOnlyCollection<int> MissingIndices => _missing;
 
     public string? GetResolvedPath(int index)
@@ -65,7 +68,7 @@ public sealed class TextureLibrary
         return $"ExtTile{index:00}";
     }
 
-    public TextureImage ComposeLayeredTexture(byte[] layer1, byte[] layer2, float[] alpha)
+    public TextureImage ComposeLayeredTexture(byte[] layer1, byte[] layer2, float[] alpha, int? detailFactorOverride = null)
     {
         var size = WorldLoader.TerrainSize;
         if (layer1.Length != size * size || layer2.Length != size * size || alpha.Length != size * size)
@@ -73,7 +76,7 @@ public sealed class TextureLibrary
             throw new ArgumentException("Camadas inválidas");
         }
 
-        var patch = _detailFactor;
+        var patch = detailFactorOverride.HasValue ? Math.Max(1, detailFactorOverride.Value) : _detailFactor;
         var width = size * patch;
         var pixels = new byte[width * width * 4];
 
@@ -93,6 +96,49 @@ public sealed class TextureLibrary
         }
 
         return new TextureImage(width, width, pixels);
+    }
+
+    public int EstimateDetailFactor(int minimum = 8, int maximum = 32)
+    {
+        minimum = Math.Max(1, minimum);
+        maximum = Math.Max(minimum, maximum);
+
+        var largest = 0;
+        foreach (var entry in _cache.Values)
+        {
+            if (entry is null)
+            {
+                continue;
+            }
+
+            var dimension = Math.Max(entry.Width, entry.Height);
+            if (dimension > largest)
+            {
+                largest = dimension;
+            }
+        }
+
+        if (largest <= 0)
+        {
+            return minimum;
+        }
+
+        var recommended = 1;
+        while (recommended < largest)
+        {
+            recommended <<= 1;
+        }
+
+        if (recommended < minimum)
+        {
+            recommended = minimum;
+        }
+        else if (recommended > maximum)
+        {
+            recommended = maximum;
+        }
+
+        return recommended;
     }
 
     private void BlendTile(byte[] canvas, TextureImage basePatch, TextureImage? overlay, float alpha, int mode, int canvasWidth, int patchSize, int tileX, int tileY)

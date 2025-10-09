@@ -82,6 +82,17 @@ public sealed class WorldLoader
         {
             litComposite = ApplyLightMap(compositeTexture, lightMap);
         }
+        var highDetailFactor = textureLibrary.EstimateDetailFactor();
+        TextureImage? highDetailComposite = null;
+        TextureImage? highDetailLitComposite = null;
+        if (highDetailFactor > textureLibrary.DetailFactor)
+        {
+            highDetailComposite = textureLibrary.ComposeLayeredTexture(terrain.Layer1, terrain.Layer2, terrain.Alpha, highDetailFactor);
+            if (lightMap is not null)
+            {
+                highDetailLitComposite = ApplyLightMap(highDetailComposite, lightMap);
+            }
+        }
         var specialTextures = textureLibrary.LoadSpecialTextures(mapContext);
         var tileTextures = new Dictionary<byte, string?>(tileIndices.Count);
         var tileMaterials = new Dictionary<byte, MaterialFlags>(tileIndices.Count);
@@ -98,6 +109,8 @@ public sealed class WorldLoader
         {
             CompositeTexture = compositeTexture,
             LitCompositeTexture = litComposite,
+            HighDetailCompositeTexture = highDetailComposite,
+            HighDetailLitCompositeTexture = highDetailLitComposite,
             LightMap = lightMap,
             LightMapPath = lightMapPath,
             TileTextures = tileTextures,

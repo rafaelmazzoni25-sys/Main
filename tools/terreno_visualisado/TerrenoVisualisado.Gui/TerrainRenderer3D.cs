@@ -146,24 +146,17 @@ internal sealed class TerrainRenderer3D : IDisposable
         GL.ActiveTexture(TextureUnit.Texture0);
         _textureHandle = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _textureHandle);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
         GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
         GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, image.Width, image.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, image.Pixels);
-        GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
+        GlTextureHelpers.ApplySamplerParameters(TextureTarget.Texture2D, generateMipmaps: true);
 
         var lightImage = _lightMap ?? TextureImage.FromRgba(1, 1, new byte[] { 255, 255, 255, 255 });
         GL.ActiveTexture(TextureUnit.Texture1);
         _lightTextureHandle = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, _lightTextureHandle);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
         GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
         GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, lightImage.Width, lightImage.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, lightImage.Pixels);
+        GlTextureHelpers.ApplySamplerParameters(TextureTarget.Texture2D, generateMipmaps: false);
 
         _indexCount = _mesh.Indices.Length;
         _dirty = false;

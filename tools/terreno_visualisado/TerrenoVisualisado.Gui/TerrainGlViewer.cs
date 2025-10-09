@@ -209,15 +209,20 @@ internal sealed class TerrainGlViewer : UserControl
             return;
         }
 
-        var materialFlags = world.Visual?.MaterialFlagsPerTile;
+        var visual = world.Visual;
+        var materialFlags = visual?.MaterialFlagsPerTile;
         _mesh = TerrainMeshBuilder.Build(world.Terrain, materialFlags);
         var context = MapContext.ForMapId(world.MapId);
         var lightDirection = context.IsBattleCastle
             ? new Vector3(0.5f, -1.0f, 1.0f)
             : DefaultLightDirection;
-        var terrainTexture = world.Visual?.LitCompositeTexture ?? world.Visual?.CompositeTexture;
-        var lightMap = world.Visual?.LightMap;
-        var fogColor = EstimateFogColor(terrainTexture ?? world.Visual?.CompositeTexture, context);
+        var terrainTexture = visual?.HighDetailLitCompositeTexture
+            ?? visual?.HighDetailCompositeTexture
+            ?? visual?.LitCompositeTexture
+            ?? visual?.CompositeTexture;
+        var lightMap = visual?.LightMap;
+        var fogReference = terrainTexture ?? visual?.HighDetailCompositeTexture ?? visual?.CompositeTexture;
+        var fogColor = EstimateFogColor(fogReference, context);
         var fogParams = EstimateFogParams(context);
         _renderer.UpdateData(_mesh, terrainTexture, lightMap, lightDirection, fogColor, fogParams, _fogEnabled, _lightingEnabled);
         _objectRenderer.UpdateWorld(world);

@@ -368,13 +368,9 @@ internal sealed class ObjectRenderer3D : IDisposable
 
         var handle = GL.GenTexture();
         GL.BindTexture(TextureTarget.Texture2D, handle);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.LinearMipmapLinear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.Repeat);
-        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.Repeat);
         GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
         GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba, image.Width, image.Height, 0, PixelFormat.Rgba, PixelType.UnsignedByte, image.Pixels);
-        GL.GenerateMipmap(GenerateMipmapTarget.Texture2D);
+        GlTextureHelpers.ApplySamplerParameters(TextureTarget.Texture2D, generateMipmaps: true);
 
         _textureCache[key] = handle;
         return handle;
