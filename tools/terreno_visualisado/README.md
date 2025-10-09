@@ -100,6 +100,10 @@ atributos e alfa, além de sobrepor os objetos estáticos nas posições correta
 A tela principal permite selecionar as pastas do mundo e dos objetos, informar
 um `EnumModelType.eum` opcional e ajustar escala/ID do mapa. Após o carregamento
 é possível exportar o mesmo JSON gerado pelo utilitário de linha de comando.
+O repositório inclui uma versão gerada automaticamente em `data/EnumModelType.eum`
+— utilize-a diretamente ou regenere o arquivo executando
+`python tools/terreno_visualisado/scripts/generate_enum_modeltype.py` a partir
+da raiz do projeto.
 
 Além do preview 2D tradicional, a interface inclui uma aba **Visualização 3D**
 com um renderizador OpenGL. O heightmap é convertido para uma malha completa,
