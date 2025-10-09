@@ -84,9 +84,10 @@ Opções principais:
 * `--enum <arquivo>`: caminho para o `_enum.h` para exibir o nome textual dos objetos.
 * `--height-scale <valor>`: fator aplicado ao `TerrainHeight.OZB` clássico.
 * `--extended-height`: força o uso do `TerrainHeightNew.OZB` mesmo que o clássico exista.
+* `--skip-attributes`: ignora o carregamento do `EncTerrain*.att` (útil para mundos com arquivos corrompidos ou ausentes).
 
 A execução imprime um sumário contendo o ID detectado, o número total de tiles
-por material, a contagem de atributos especiais e um ranking com os tipos de
+por material, a contagem de atributos especiais (quando carregados) e um ranking com os tipos de
 objetos estáticos mais comuns. O utilitário também gera um arquivo JSON
 `terrainsummary.json` no diretório atual contendo todas as amostras de altura,
 camadas e objetos já alinhados ao terreno, permitindo integrações com outras
@@ -105,7 +106,9 @@ irmã correspondente (quando encontrada). Após o carregamento
 O repositório inclui uma versão gerada automaticamente em `data/EnumModelType.eum`
 — utilize-a diretamente ou regenere o arquivo executando
 `python tools/terreno_visualisado/scripts/generate_enum_modeltype.py` a partir
-da raiz do projeto.
+da raiz do projeto. Um checkbox específico permite habilitar ou desabilitar a
+leitura do `EncTerrain*.att`, refletindo imediatamente no sumário e nos modos
+de visualização disponíveis.
 
 Além do preview 2D tradicional, a interface inclui uma aba **Visualização 3D**
 com um renderizador OpenGL. O heightmap é convertido para uma malha completa,
