@@ -17,6 +17,7 @@ A Main.exe é um componente essencial do MuOnline, responsável por executar o c
 ## Ferramentas auxiliares
 
 - **Terrain_Editor (C++)** – novo visualizador em OpenGL que lê os mesmos arquivos `EncTerrain` do cliente, gera a malha do mapa e posiciona objetos estáticos para inspeção rápida sem depender do script Python legado.【F:tools/Terrain_Editor/README.md†L1-L41】
+- **Map Walker (Python/Qt)** – interface gráfica multiplataforma que permite escolher qualquer `WorldX`, carregar alturas, atributos e objetos e navegar em tempo real com travamento ao solo e painel de ajustes.【F:tools/map_walker/README.md†L1-L84】【F:tools/map_walker/map_walker.py†L1-L548】
 
 ## Requisitos
 
