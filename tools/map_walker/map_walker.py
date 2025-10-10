@@ -596,7 +596,7 @@ class TerrainView(QOpenGLWidget):
         self._show_grid = True
         self._show_objects = True
         self._keys: set[int] = set()
-        self._mouse_pos = QtCore.QPoint()
+        self._mouse_pos = QtCore.QPointF()
         self._rotate_active = False
         self._yaw = math.radians(-90)
         self._pitch = math.radians(-20)
@@ -668,7 +668,7 @@ class TerrainView(QOpenGLWidget):
                 return
             projection = self._projection_matrix()
             view = self._view_matrix()
-            mvp = projection @ view
+            mvp = view @ projection
             mvp_uniform = np.ascontiguousarray(mvp.T, dtype=np.float32)
             normal_matrix = np.identity(3, dtype=np.float32)
             normal_uniform = np.ascontiguousarray(normal_matrix.T, dtype=np.float32)
@@ -904,17 +904,17 @@ class TerrainView(QOpenGLWidget):
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.RightButton:
             self._rotate_active = True
-            self._mouse_pos = event.pos()
+            self._mouse_pos = event.position()
             self.setCursor(QtCore.Qt.BlankCursor)
 
     def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
         if self._rotate_active:
-            delta = event.pos() - self._mouse_pos
+            delta = event.position() - self._mouse_pos
             sensitivity = 0.005
             self._yaw += delta.x() * sensitivity
             self._pitch += delta.y() * sensitivity
             self._pitch = max(math.radians(-89), min(math.radians(89), self._pitch))
-            self._mouse_pos = event.pos()
+            self._mouse_pos = event.position()
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.RightButton and self._rotate_active:
