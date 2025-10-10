@@ -669,10 +669,22 @@ class TerrainView(QOpenGLWidget):
             projection = self._projection_matrix()
             view = self._view_matrix()
             mvp = projection @ view
+            mvp_uniform = np.ascontiguousarray(mvp.T, dtype=np.float32)
             normal_matrix = np.identity(3, dtype=np.float32)
+            normal_uniform = np.ascontiguousarray(normal_matrix.T, dtype=np.float32)
             GL.glUseProgram(self._terrain_program)
-            GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._terrain_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
-            GL.glUniformMatrix3fv(GL.glGetUniformLocation(self._terrain_program, "u_normal"), 1, GL.GL_FALSE, normal_matrix)
+            GL.glUniformMatrix4fv(
+                GL.glGetUniformLocation(self._terrain_program, "u_mvp"),
+                1,
+                GL.GL_FALSE,
+                mvp_uniform,
+            )
+            GL.glUniformMatrix3fv(
+                GL.glGetUniformLocation(self._terrain_program, "u_normal"),
+                1,
+                GL.GL_FALSE,
+                normal_uniform,
+            )
             GL.glUniform3fv(GL.glGetUniformLocation(self._terrain_program, "u_base_color"), 1, self._base_color)
             GL.glUniform3f(GL.glGetUniformLocation(self._terrain_program, "u_light_direction"), -0.4, 0.8, -0.3)
             GL.glUniform1f(GL.glGetUniformLocation(self._terrain_program, "u_ambient"), 0.25)
@@ -695,7 +707,12 @@ class TerrainView(QOpenGLWidget):
 
             if self._show_grid and self._grid_program and self._grid_vbo:
                 GL.glUseProgram(self._grid_program)
-                GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._grid_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
+                GL.glUniformMatrix4fv(
+                    GL.glGetUniformLocation(self._grid_program, "u_mvp"),
+                    1,
+                    GL.GL_FALSE,
+                    mvp_uniform,
+                )
                 GL.glUniform3f(GL.glGetUniformLocation(self._grid_program, "u_color"), 0.15, 0.4, 0.6)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._grid_vbo)
                 pos_loc = GL.glGetAttribLocation(self._grid_program, "a_position")
@@ -708,7 +725,12 @@ class TerrainView(QOpenGLWidget):
 
             if self._show_objects and self._objects_vbo:
                 GL.glUseProgram(self._grid_program)
-                GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._grid_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
+                GL.glUniformMatrix4fv(
+                    GL.glGetUniformLocation(self._grid_program, "u_mvp"),
+                    1,
+                    GL.GL_FALSE,
+                    mvp_uniform,
+                )
                 GL.glUniform3f(GL.glGetUniformLocation(self._grid_program, "u_color"), 0.9, 0.3, 0.2)
                 GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._objects_vbo)
                 pos_loc = GL.glGetAttribLocation(self._grid_program, "a_position")
