@@ -35,6 +35,14 @@ pip install PySide6 PyOpenGL numpy
 Opcionalmente é possível instalar `PyOpenGL_accelerate` para melhorar a
 performance em GPUs integradas.
 
+### Requisitos de OpenGL
+
+O `Map Walker` solicita um contexto **OpenGL 2.1 (perfil compatível)** ao Qt.
+Drivers desatualizados ou que ofereçam apenas OpenGL 1.x/ES farão com que a
+renderização seja desativada. Nesses casos, a janela exibirá uma mensagem em
+vermelho com o motivo do erro e instruções para atualizar o driver ou utilizar
+outro computador/placa de vídeo.
+
 ## Como usar
 
 1. Execute o script apontando para a raiz do repositório ou para a pasta
@@ -107,6 +115,8 @@ Todas as alterações são aplicadas imediatamente.
   apenas para inspeção visual e validação de atributos.
 - Mapas com arquivos ausentes serão ignorados na lista até que os recursos
   necessários sejam copiados para a pasta `Data`.
+- Caso o driver não suporte OpenGL 2.1, a renderização é desativada e uma
+  mensagem explicando o problema é apresentada diretamente no visualizador.
 
 ## Licença
 

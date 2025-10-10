@@ -21,6 +21,7 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from OpenGL import GL
+from OpenGL import error as gl_error
 from OpenGL.GL import shaders
 
 # Constantes dos atributos
@@ -582,6 +583,7 @@ class TerrainView(QOpenGLWidget):
     lockStateChanged = QtCore.Signal(bool)
     gridVisibilityChanged = QtCore.Signal(bool)
     objectVisibilityChanged = QtCore.Signal(bool)
+    renderErrorOccurred = QtCore.Signal(str)
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -610,6 +612,8 @@ class TerrainView(QOpenGLWidget):
         self._grid_vertex_count = 0
         self._objects_vbo = 0
         self._objects_vertex_count = 0
+        self._render_failed_message: Optional[str] = None
+        self._render_error_reported = False
 
     def set_eye_height(self, value: float) -> None:
         self._eye_height = float(value)
@@ -639,7 +643,13 @@ class TerrainView(QOpenGLWidget):
         return tuple(float(v) for v in self._camera_pos)
 
     def initializeGL(self) -> None:
-        self._init_programs()
+        self._render_failed_message = None
+        self._render_error_reported = False
+        try:
+            self._init_programs()
+        except (gl_error.GLError, RuntimeError) as exc:
+            self._handle_render_error("Falha ao compilar shaders", exc)
+            return
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glEnable(GL.GL_CULL_FACE)
         GL.glCullFace(GL.GL_BACK)
@@ -649,61 +659,67 @@ class TerrainView(QOpenGLWidget):
         GL.glViewport(0, 0, width, max(1, height))
 
     def paintGL(self) -> None:
-        GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
-        if self._terrain_program is None or self._terrain_vbo == 0:
+        if self._render_failed_message:
+            self._draw_error_overlay()
             return
-        projection = self._projection_matrix()
-        view = self._view_matrix()
-        mvp = projection @ view
-        normal_matrix = np.identity(3, dtype=np.float32)
-        GL.glUseProgram(self._terrain_program)
-        GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._terrain_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
-        GL.glUniformMatrix3fv(GL.glGetUniformLocation(self._terrain_program, "u_normal"), 1, GL.GL_FALSE, normal_matrix)
-        GL.glUniform3fv(GL.glGetUniformLocation(self._terrain_program, "u_base_color"), 1, self._base_color)
-        GL.glUniform3f(GL.glGetUniformLocation(self._terrain_program, "u_light_direction"), -0.4, 0.8, -0.3)
-        GL.glUniform1f(GL.glGetUniformLocation(self._terrain_program, "u_ambient"), 0.25)
+        try:
+            GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+            if self._terrain_program is None or self._terrain_vbo == 0:
+                return
+            projection = self._projection_matrix()
+            view = self._view_matrix()
+            mvp = projection @ view
+            normal_matrix = np.identity(3, dtype=np.float32)
+            GL.glUseProgram(self._terrain_program)
+            GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._terrain_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
+            GL.glUniformMatrix3fv(GL.glGetUniformLocation(self._terrain_program, "u_normal"), 1, GL.GL_FALSE, normal_matrix)
+            GL.glUniform3fv(GL.glGetUniformLocation(self._terrain_program, "u_base_color"), 1, self._base_color)
+            GL.glUniform3f(GL.glGetUniformLocation(self._terrain_program, "u_light_direction"), -0.4, 0.8, -0.3)
+            GL.glUniform1f(GL.glGetUniformLocation(self._terrain_program, "u_ambient"), 0.25)
 
-        pos_loc = GL.glGetAttribLocation(self._terrain_program, "a_position")
-        norm_loc = GL.glGetAttribLocation(self._terrain_program, "a_normal")
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._terrain_vbo)
-        GL.glEnableVertexAttribArray(pos_loc)
-        GL.glVertexAttribPointer(pos_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._terrain_nbo)
-        GL.glEnableVertexAttribArray(norm_loc)
-        GL.glVertexAttribPointer(norm_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-        GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self._terrain_ibo)
-        GL.glDrawElements(GL.GL_TRIANGLES, self._terrain_index_count, GL.GL_UNSIGNED_INT, None)
-        GL.glDisableVertexAttribArray(pos_loc)
-        GL.glDisableVertexAttribArray(norm_loc)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-        GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, 0)
-        GL.glUseProgram(0)
-
-        if self._show_grid and self._grid_program and self._grid_vbo:
-            GL.glUseProgram(self._grid_program)
-            GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._grid_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
-            GL.glUniform3f(GL.glGetUniformLocation(self._grid_program, "u_color"), 0.15, 0.4, 0.6)
-            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._grid_vbo)
-            pos_loc = GL.glGetAttribLocation(self._grid_program, "a_position")
+            pos_loc = GL.glGetAttribLocation(self._terrain_program, "a_position")
+            norm_loc = GL.glGetAttribLocation(self._terrain_program, "a_normal")
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._terrain_vbo)
             GL.glEnableVertexAttribArray(pos_loc)
             GL.glVertexAttribPointer(pos_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-            GL.glDrawArrays(GL.GL_LINES, 0, self._grid_vertex_count)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._terrain_nbo)
+            GL.glEnableVertexAttribArray(norm_loc)
+            GL.glVertexAttribPointer(norm_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
+            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self._terrain_ibo)
+            GL.glDrawElements(GL.GL_TRIANGLES, self._terrain_index_count, GL.GL_UNSIGNED_INT, None)
             GL.glDisableVertexAttribArray(pos_loc)
+            GL.glDisableVertexAttribArray(norm_loc)
             GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, 0)
             GL.glUseProgram(0)
 
-        if self._show_objects and self._objects_vbo:
-            GL.glUseProgram(self._grid_program)
-            GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._grid_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
-            GL.glUniform3f(GL.glGetUniformLocation(self._grid_program, "u_color"), 0.9, 0.3, 0.2)
-            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._objects_vbo)
-            pos_loc = GL.glGetAttribLocation(self._grid_program, "a_position")
-            GL.glEnableVertexAttribArray(pos_loc)
-            GL.glVertexAttribPointer(pos_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
-            GL.glDrawArrays(GL.GL_LINES, 0, self._objects_vertex_count)
-            GL.glDisableVertexAttribArray(pos_loc)
-            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-            GL.glUseProgram(0)
+            if self._show_grid and self._grid_program and self._grid_vbo:
+                GL.glUseProgram(self._grid_program)
+                GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._grid_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
+                GL.glUniform3f(GL.glGetUniformLocation(self._grid_program, "u_color"), 0.15, 0.4, 0.6)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._grid_vbo)
+                pos_loc = GL.glGetAttribLocation(self._grid_program, "a_position")
+                GL.glEnableVertexAttribArray(pos_loc)
+                GL.glVertexAttribPointer(pos_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
+                GL.glDrawArrays(GL.GL_LINES, 0, self._grid_vertex_count)
+                GL.glDisableVertexAttribArray(pos_loc)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                GL.glUseProgram(0)
+
+            if self._show_objects and self._objects_vbo:
+                GL.glUseProgram(self._grid_program)
+                GL.glUniformMatrix4fv(GL.glGetUniformLocation(self._grid_program, "u_mvp"), 1, GL.GL_FALSE, mvp)
+                GL.glUniform3f(GL.glGetUniformLocation(self._grid_program, "u_color"), 0.9, 0.3, 0.2)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._objects_vbo)
+                pos_loc = GL.glGetAttribLocation(self._grid_program, "a_position")
+                GL.glEnableVertexAttribArray(pos_loc)
+                GL.glVertexAttribPointer(pos_loc, 3, GL.GL_FLOAT, GL.GL_FALSE, 0, None)
+                GL.glDrawArrays(GL.GL_LINES, 0, self._objects_vertex_count)
+                GL.glDisableVertexAttribArray(pos_loc)
+                GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+                GL.glUseProgram(0)
+        except gl_error.GLError as exc:
+            self._handle_render_error("Falha durante a renderização", exc)
 
     def set_terrain(self, data: Optional[TerrainData]) -> None:
         self.makeCurrent()
@@ -892,7 +908,7 @@ class TerrainView(QOpenGLWidget):
         now = time.perf_counter()
         dt = now - self._last_time
         self._last_time = now
-        if self._terrain is None or dt <= 0:
+        if self._render_failed_message or self._terrain is None or dt <= 0:
             return
         speed = self._move_speed
         if QtCore.Qt.Key_Shift in self._keys:
@@ -961,6 +977,40 @@ class TerrainView(QOpenGLWidget):
         view[:3, 3] = -view[:3, :3] @ self._camera_pos
         return view
 
+    def _draw_error_overlay(self) -> None:
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), QtGui.QColor(10, 12, 18))
+        painter.setPen(QtGui.QColor(240, 120, 120))
+        painter.setFont(QtGui.QFont("Arial", 12))
+        text_rect = self.rect().adjusted(40, 40, -40, -40)
+        message = (
+            "Não foi possível inicializar o OpenGL necessário para o Map Walker.\n\n"
+            "Detalhes:\n"
+            f"{self._render_failed_message}\n\n"
+            "Atualize o driver da placa de vídeo ou habilite o suporte a OpenGL 2.1 e tente novamente."
+        )
+        painter.drawText(
+            text_rect,
+            QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
+            message,
+        )
+        painter.end()
+
+    def _handle_render_error(self, stage: str, exc: BaseException) -> None:
+        self._render_failed_message = f"{stage}: {exc}"
+        if not self._render_error_reported:
+            self._render_error_reported = True
+            self.renderErrorOccurred.emit(self._render_failed_message)
+        self._terrain_program = None
+        self._grid_program = None
+        self._terrain_vbo = 0
+        self._terrain_nbo = 0
+        self._terrain_ibo = 0
+        self._grid_vbo = 0
+        self._objects_vbo = 0
+        self._objects_vertex_count = 0
+        self.update()
+
 
 class MapWalkerWindow(QtWidgets.QMainWindow):
     def __init__(self, repository: TerrainRepository, initial_path: Optional[str] = None) -> None:
@@ -979,6 +1029,7 @@ class MapWalkerWindow(QtWidgets.QMainWindow):
 
         self.status_label = QtWidgets.QLabel("Nenhum mapa carregado", self)
         self.statusBar().addPermanentWidget(self.status_label, 1)
+        self._render_error_shown = False
 
         self.panel.dataDirectoryChanged.connect(self._on_data_directory)
         self.panel.mapChanged.connect(self._on_map_selected)
@@ -993,6 +1044,7 @@ class MapWalkerWindow(QtWidgets.QMainWindow):
         self.view.lockStateChanged.connect(self.panel.set_lock_state)
         self.view.gridVisibilityChanged.connect(self.panel.set_grid_visible)
         self.view.objectVisibilityChanged.connect(self.panel.set_objects_visible)
+        self.view.renderErrorOccurred.connect(self._on_render_error)
 
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -1033,6 +1085,17 @@ class MapWalkerWindow(QtWidgets.QMainWindow):
         if descriptor:
             self._load_descriptor(descriptor)
 
+    def _on_render_error(self, message: str) -> None:
+        if self._render_error_shown:
+            return
+        self._render_error_shown = True
+        text = (
+            "Não foi possível inicializar o contexto OpenGL necessário para o Map Walker.\n\n"
+            f"Detalhes: {message}\n\n"
+            "Atualize o driver da placa de vídeo ou utilize uma máquina com suporte a OpenGL 2.1."
+        )
+        QtWidgets.QMessageBox.critical(self, "OpenGL", text)
+
     def _load_descriptor(self, descriptor: MapDescriptor) -> None:
         try:
             variant = self.panel.current_variant()
@@ -1062,11 +1125,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_opengl() -> None:
+    QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseDesktopOpenGL)
+    format = QtGui.QSurfaceFormat()
+    format.setRenderableType(QtGui.QSurfaceFormat.OpenGL)
+    format.setVersion(2, 1)
+    if hasattr(QtGui.QSurfaceFormat, "CompatibilityProfile"):
+        format.setProfile(QtGui.QSurfaceFormat.CompatibilityProfile)
+    format.setSwapBehavior(QtGui.QSurfaceFormat.DoubleBuffer)
+    format.setDepthBufferSize(24)
+    format.setStencilBufferSize(8)
+    QtGui.QSurfaceFormat.setDefaultFormat(format)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     QtCore.QCoreApplication.setOrganizationName("ProjectRebirthMu")
     QtCore.QCoreApplication.setApplicationName("Map Walker")
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    configure_opengl()
     app = QtWidgets.QApplication(sys.argv)
     repo = TerrainRepository()
     window = MapWalkerWindow(repo, initial_path=args.data)
